@@ -31,6 +31,7 @@ pub struct MsgTransfer {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MsgTransferResponse {
 }
+/// FungibleTokenPacketData defines a struct for the packet payload
 /// See FungibleTokenPacketData spec:
 /// https://github.com/cosmos/ics/tree/master/spec/ics-020-fungible-token-transfer#data-structures
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -121,6 +122,7 @@ pub struct QueryParamsResponse {
     #[prost(message, optional, tag="1")]
     pub params: ::core::option::Option<Params>,
 }
+/// GenesisState defines the ibc-transfer genesis state
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GenesisState {
     #[prost(string, tag="1")]

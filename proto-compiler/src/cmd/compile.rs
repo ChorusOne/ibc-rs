@@ -103,7 +103,7 @@ impl CompileCmd {
         let includes: Vec<PathBuf> = proto_includes_paths.iter().map(PathBuf::from).collect();
 
         let compilation = tonic_build::configure()
-            .build_client(true)
+            .build_client(false)
             .build_server(false)
             .format(false)
             .out_dir(out_dir)
@@ -180,7 +180,7 @@ impl CompileCmd {
         let includes: Vec<PathBuf> = proto_includes_paths.iter().map(PathBuf::from).collect();
 
         let compilation = tonic_build::configure()
-            .build_client(true)
+            .build_client(false)
             .build_server(false)
             .format(false)
             .out_dir(out_dir)
