@@ -4,6 +4,7 @@ use tendermint::block::Height;
 use tokio::runtime::Runtime as TokioRuntime;
 
 pub use cosmos::CosmosSdkChain;
+pub use celo::CeloChain;
 
 use ibc::events::IbcEvent;
 use ibc::ics02_client::client_consensus::{
@@ -42,6 +43,7 @@ use crate::light_client::LightClient;
 use crate::{config::ChainConfig, event::monitor::EventReceiver};
 
 pub(crate) mod cosmos;
+pub(crate) mod celo;
 pub mod counterparty;
 pub mod handle;
 pub mod runtime;
@@ -80,6 +82,7 @@ pub trait ChainEndpoint: Sized {
 
     /// Type of headers for this chain
     type Header: Header;
+
 
     /// Type of consensus state for this chain
     type ConsensusState: ConsensusState;
@@ -157,7 +160,7 @@ pub trait ChainEndpoint: Sized {
         &self,
         client_id: &ClientId,
         height: ICSHeight,
-    ) -> Result<Self::ClientState, Error>;
+    ) -> Result<AnyClientState, Error>;
 
     fn query_consensus_states(
         &self,

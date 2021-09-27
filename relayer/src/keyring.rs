@@ -189,7 +189,7 @@ impl KeyStore for Test {
         })?;
 
         let key_entry = serde_json::from_reader(file)
-            .map_err(|e| Error::key_file_decode(format!("{}", key_file.display()), e))?;
+            .map_err(|e| Error::key_file_decode(format!("giulio: {}", key_file.display()), e))?;
 
         Ok(key_entry)
     }
@@ -326,6 +326,7 @@ impl KeyRing {
     ) -> Result<KeyEntry, Error> {
         // Get the private key from the mnemonic
         let private_key = private_key_from_mnemonic(mnemonic_words, hd_path)?;
+        println!("giulio private_key_from_mnemonic {:?}", private_key);
 
         // Get the public Key from the private key
         let public_key = ExtendedPubKey::from_private(&Secp256k1::new(), &private_key);

@@ -10,6 +10,7 @@ use ibc_relayer::{
         handle::{ChainHandle, ProdChainHandle},
         runtime::ChainRuntime,
         CosmosSdkChain,
+        CeloChain,
     },
     config::Config,
 };
@@ -66,10 +67,17 @@ pub fn spawn_chain_runtime_generic<Chain: ChainHandle>(
         .ok_or_else(|| Error::missing_config(chain_id.clone()))?;
 
     let rt = Arc::new(TokioRuntime::new().unwrap());
+    if chain_config.account_prefix == "cosmos" {
     let handle =
         ChainRuntime::<CosmosSdkChain>::spawn::<Chain>(chain_config, rt).map_err(Error::relayer)?;
-
     Ok(handle)
+    } else if chain_config.account_prefix == "celo" {
+    let handle =
+        ChainRuntime::<CeloChain>::spawn::<Chain>(chain_config, rt).map_err(Error::relayer)?;
+    Ok(handle)
+    } else {
+        panic!("account_prefix not recognized");
+    }
 }
 
 /// Spawns a chain runtime for specified chain identifier, queries the counterparty chain associated

@@ -7,6 +7,7 @@ use bytes::BufMut;
 use flex_error::define_error;
 use prost_types::Any;
 
+use ibc::downcast;
 use ibc::ics02_client::client_state::AnyClientState;
 use ibc::ics02_client::height::Height;
 use ibc::ics24_host::identifier::{ChainId, ClientId};
@@ -70,8 +71,11 @@ pub fn build_and_send_ibc_upgrade_proposal(
         .map_err(UpgradeChainError::query)?
         .add(opts.height_offset);
 
-    let client_state = src_chain
+    let any_client_state = src_chain
         .query_client_state(&opts.src_client_id, Height::zero())
+        .map_err(UpgradeChainError::query)?;
+    let client_state = downcast!(any_client_state => AnyClientState::Tendermint)
+        .ok_or_else(||Error::client_state_type(String::from("type unknown")))
         .map_err(UpgradeChainError::query)?;
 
     // Retain the old unbonding period in case the user did not specify a new one

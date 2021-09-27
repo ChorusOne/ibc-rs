@@ -642,6 +642,16 @@ impl<DstChain: ChainHandle, SrcChain: ChainHandle> ForeignClient<DstChain, SrcCh
         target_height: Height,
         trusted_height: Height,
     ) -> Result<Vec<Any>, ForeignClientError> {
+
+        println!("giulio - ForeignClient::build_update_client_with_trusted {} -> {}", self.src_chain.id(), self.dst_chain.id());
+        println!("giulio - ForeignClient::build_update_client_with_trusted {} -> {}", trusted_height, target_height);
+        if trusted_height >= target_height {
+            warn!(
+                "[{}] skipping update: trusted height ({}) >= chain target height ({})",
+                self, trusted_height, target_height
+            );
+            return Ok(vec![]);
+        }
         // Wait for source chain to reach `target_height`
         while self.src_chain().query_latest_height().map_err(|e| {
             ForeignClientError::client_create(
@@ -673,13 +683,6 @@ impl<DstChain: ChainHandle, SrcChain: ChainHandle> ForeignClient<DstChain, SrcCh
             trusted_height
         };
 
-        if trusted_height >= target_height {
-            warn!(
-                "[{}] skipping update: trusted height ({}) >= chain target height ({})",
-                self, trusted_height, target_height
-            );
-            return Ok(vec![]);
-        }
 
         let (header, support) = self
             .src_chain()
@@ -726,6 +729,7 @@ impl<DstChain: ChainHandle, SrcChain: ChainHandle> ForeignClient<DstChain, SrcCh
             header.height(),
         );
 
+        println!("giulio - ForeignClient::build_update_client_with_trusted - header {:?}", header.client_type ());
         msgs.push(
             MsgUpdateAnyClient {
                 header,
@@ -735,6 +739,7 @@ impl<DstChain: ChainHandle, SrcChain: ChainHandle> ForeignClient<DstChain, SrcCh
             .to_any(),
         );
 
+        println!("giulio - ForeignClient::build_update_client_with_trusted - {:?}", msgs[0].type_url);
         Ok(msgs)
     }
 

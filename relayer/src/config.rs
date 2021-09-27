@@ -7,6 +7,7 @@ use alloc::collections::BTreeMap as HashMap;
 use alloc::collections::BTreeSet as HashSet;
 use core::{fmt, time::Duration};
 use std::{fs, fs::File, io::Write, path::Path};
+use std::path::PathBuf;
 
 use serde_derive::{Deserialize, Serialize};
 use tendermint_light_client::types::TrustThreshold;
@@ -309,6 +310,8 @@ pub struct ChainConfig {
     pub rpc_addr: tendermint_rpc::Url,
     pub websocket_addr: tendermint_rpc::Url,
     pub grpc_addr: tendermint_rpc::Url,
+    pub simul_file: PathBuf,
+    pub code_id: String,
     #[serde(default = "default::rpc_timeout", with = "humantime_serde")]
     pub rpc_timeout: Duration,
     pub account_prefix: String,

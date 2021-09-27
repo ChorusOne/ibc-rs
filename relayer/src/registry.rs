@@ -11,7 +11,7 @@ use tracing::{trace, warn};
 use ibc::ics24_host::identifier::ChainId;
 
 use crate::{
-    chain::{handle::ChainHandle, runtime::ChainRuntime, CosmosSdkChain},
+    chain::{handle::ChainHandle, runtime::ChainRuntime, CeloChain, CosmosSdkChain},
     config::Config,
     error::Error as RelayerError,
     supervisor::RwArc,
@@ -127,8 +127,17 @@ pub fn spawn_chain_runtime<Chain: ChainHandle>(
         .cloned()
         .ok_or_else(|| SpawnError::missing_chain(chain_id.clone()))?;
 
-    let handle =
-        ChainRuntime::<CosmosSdkChain>::spawn(chain_config, rt).map_err(SpawnError::relayer)?;
-
-    Ok(handle)
+    if chain_config.account_prefix == "cosmos" {
+        println!("init of cosmos sdk");
+        let handle =
+            ChainRuntime::<CosmosSdkChain>::spawn(chain_config, rt).map_err(SpawnError::relayer)?;
+        return Ok(handle);
+    } else if chain_config.account_prefix == "celo" {
+        println!("init of celo");
+        let handle =
+            ChainRuntime::<CeloChain>::spawn(chain_config, rt).map_err(SpawnError::relayer)?;
+        return Ok(handle);
+    } else {
+        panic!("chain prefix not recognized")
+    }
 }

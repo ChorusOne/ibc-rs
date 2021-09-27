@@ -6,6 +6,7 @@ use crate::error;
 use ibc::ics02_client::events::UpdateClient;
 
 pub mod tendermint;
+pub mod celo_ibft;
 
 #[cfg(test)]
 pub mod mock;
