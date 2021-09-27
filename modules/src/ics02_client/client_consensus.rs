@@ -12,7 +12,8 @@ use crate::events::IbcEventType;
 use crate::ics02_client::client_type::ClientType;
 use crate::ics02_client::error::Error;
 use crate::ics02_client::height::Height;
-use crate::ics07_tendermint::consensus_state;
+use crate::ics07_tendermint::consensus_state::ConsensusState as TMConsensusState;
+use crate::ics28_wasm::consensus_state::ConsensusState as WasmConsensusState;
 use crate::ics23_commitment::commitment::CommitmentRoot;
 use crate::ics24_host::identifier::ClientId;
 use crate::timestamp::Timestamp;
@@ -22,6 +23,8 @@ use crate::mock::client_state::MockConsensusState;
 
 pub const TENDERMINT_CONSENSUS_STATE_TYPE_URL: &str =
     "/ibc.lightclients.tendermint.v1.ConsensusState";
+pub const WASM_CONSENSUS_STATE_TYPE_URL: &str =
+    "/ibc.lightclients.wasm.v1.ConsensusState";
 
 pub const MOCK_CONSENSUS_STATE_TYPE_URL: &str = "/ibc.mock.ConsensusState";
 
@@ -44,7 +47,8 @@ pub trait ConsensusState: Clone + core::fmt::Debug + Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum AnyConsensusState {
-    Tendermint(consensus_state::ConsensusState),
+    Tendermint(TMConsensusState),
+    Wasm(WasmConsensusState),
 
     #[cfg(any(test, feature = "mocks"))]
     Mock(MockConsensusState),
@@ -57,6 +61,10 @@ impl AnyConsensusState {
                 let date: DateTime<Utc> = cs_state.timestamp.into();
                 Timestamp::from_datetime(date)
             }
+            Self::Wasm(cs_state) => {
+                let date: DateTime<Utc> = cs_state.timestamp.into();
+                Timestamp::from_datetime(date)
+            }
 
             #[cfg(any(test, feature = "mocks"))]
             Self::Mock(mock_state) => mock_state.timestamp(),
@@ -66,6 +74,7 @@ impl AnyConsensusState {
     pub fn client_type(&self) -> ClientType {
         match self {
             AnyConsensusState::Tendermint(_cs) => ClientType::Tendermint,
+            AnyConsensusState::Wasm(_cs) => ClientType::Wasm,
 
             #[cfg(any(test, feature = "mocks"))]
             AnyConsensusState::Mock(_cs) => ClientType::Mock,
@@ -83,7 +92,12 @@ impl TryFrom<Any> for AnyConsensusState {
             "" => Err(Error::empty_consensus_state_response()),
 
             TENDERMINT_CONSENSUS_STATE_TYPE_URL => Ok(AnyConsensusState::Tendermint(
-                consensus_state::ConsensusState::decode_vec(&value.value)
+                TMConsensusState::decode_vec(&value.value)
+                    .map_err(Error::decode_raw_client_state)?,
+            )),
+
+            WASM_CONSENSUS_STATE_TYPE_URL => Ok(AnyConsensusState::Wasm(
+                WasmConsensusState::decode_vec(&value.value)
                     .map_err(Error::decode_raw_client_state)?,
             )),
 
@@ -106,6 +120,10 @@ impl From<AnyConsensusState> for Any {
                 value: value
                     .encode_vec()
                     .expect("encoding to `Any` from `AnyConsensusState::Tendermint`"),
+            },
+            AnyConsensusState::Wasm(value) => Any{
+                type_url : WASM_CONSENSUS_STATE_TYPE_URL.to_string (),
+                value: value.encode_vec().expect("encoding to `Any` from `AnyConsensusState::Wasm`"),
             },
             #[cfg(any(test, feature = "mocks"))]
             AnyConsensusState::Mock(value) => Any {
@@ -162,6 +180,7 @@ impl ConsensusState for AnyConsensusState {
     fn root(&self) -> &CommitmentRoot {
         match self {
             Self::Tendermint(cs_state) => cs_state.root(),
+            Self::Wasm(cs_state) => cs_state.root(),
 
             #[cfg(any(test, feature = "mocks"))]
             Self::Mock(mock_state) => mock_state.root(),
@@ -171,6 +190,7 @@ impl ConsensusState for AnyConsensusState {
     fn validate_basic(&self) -> Result<(), Infallible> {
         match self {
             Self::Tendermint(cs_state) => cs_state.validate_basic(),
+            Self::Wasm(cs_state) => cs_state.validate_basic(),
 
             #[cfg(any(test, feature = "mocks"))]
             Self::Mock(mock_state) => mock_state.validate_basic(),

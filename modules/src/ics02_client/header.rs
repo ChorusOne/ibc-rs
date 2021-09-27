@@ -8,11 +8,13 @@ use tendermint_proto::Protobuf;
 use crate::ics02_client::client_type::ClientType;
 use crate::ics02_client::error::Error;
 use crate::ics07_tendermint::header::{decode_header, Header as TendermintHeader};
+use crate::ics28_wasm::header::Header as WasmHeader;
 #[cfg(any(test, feature = "mocks"))]
 use crate::mock::header::MockHeader;
 use crate::Height;
 
 pub const TENDERMINT_HEADER_TYPE_URL: &str = "/ibc.lightclients.tendermint.v1.Header";
+pub const WASM_HEADER_TYPE_URL: &str = "/ibc.lightclients.wasm.v1.Header";
 pub const MOCK_HEADER_TYPE_URL: &str = "/ibc.mock.Header";
 
 /// Abstract of consensus state update information
@@ -31,6 +33,7 @@ pub trait Header: Clone + core::fmt::Debug + Send + Sync {
 #[allow(clippy::large_enum_variant)]
 pub enum AnyHeader {
     Tendermint(TendermintHeader),
+    Wasm(WasmHeader),
 
     #[cfg(any(test, feature = "mocks"))]
     Mock(MockHeader),
@@ -40,6 +43,7 @@ impl Header for AnyHeader {
     fn client_type(&self) -> ClientType {
         match self {
             Self::Tendermint(header) => header.client_type(),
+            Self::Wasm(header) => header.client_type(),
 
             #[cfg(any(test, feature = "mocks"))]
             Self::Mock(header) => header.client_type(),
@@ -49,6 +53,7 @@ impl Header for AnyHeader {
     fn height(&self) -> Height {
         match self {
             Self::Tendermint(header) => header.height(),
+            Self::Wasm(header) => header.height(),
 
             #[cfg(any(test, feature = "mocks"))]
             Self::Mock(header) => header.height(),
@@ -73,6 +78,11 @@ impl TryFrom<Any> for AnyHeader {
                 Ok(AnyHeader::Tendermint(val))
             }
 
+            WASM_HEADER_TYPE_URL => {
+                let val = WasmHeader::decode_vec (&raw.value).map_err(Error::invalid_raw_header)?;
+                Ok(AnyHeader::Wasm(val))
+            }
+
             #[cfg(any(test, feature = "mocks"))]
             MOCK_HEADER_TYPE_URL => Ok(AnyHeader::Mock(
                 MockHeader::decode_vec(&raw.value).map_err(Error::invalid_raw_header)?,
@@ -91,6 +101,12 @@ impl From<AnyHeader> for Any {
                 value: header
                     .encode_vec()
                     .expect("encoding to `Any` from `AnyHeader::Tendermint`"),
+            },
+            AnyHeader::Wasm(header) => Any {
+                type_url: WASM_HEADER_TYPE_URL.to_string(),
+                value: header
+                    .encode_vec()
+                    .expect("encoding to `Any` from `AnyHeader::Wasm`"),
             },
             #[cfg(any(test, feature = "mocks"))]
             AnyHeader::Mock(header) => Any {

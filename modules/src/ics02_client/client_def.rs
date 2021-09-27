@@ -157,6 +157,7 @@ impl AnyClient {
     pub fn from_client_type(client_type: ClientType) -> AnyClient {
         match client_type {
             ClientType::Tendermint => Self::Tendermint(TendermintClient),
+            ClientType::Wasm => {todo!()}
 
             #[cfg(any(test, feature = "mocks"))]
             ClientType::Mock => Self::Mock(MockClient),

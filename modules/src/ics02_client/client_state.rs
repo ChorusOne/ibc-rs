@@ -12,7 +12,8 @@ use ibc_proto::ibc::core::client::v1::IdentifiedClientState;
 use crate::ics02_client::client_type::ClientType;
 use crate::ics02_client::error::Error;
 use crate::ics02_client::trust_threshold::TrustThreshold;
-use crate::ics07_tendermint::client_state;
+use crate::ics07_tendermint::client_state::ClientState as TMClientState;
+use crate::ics28_wasm::client_state::ClientState as WasmClientState;
 use crate::ics24_host::error::ValidationError;
 use crate::ics24_host::identifier::{ChainId, ClientId};
 #[cfg(any(test, feature = "mocks"))]
@@ -20,6 +21,7 @@ use crate::mock::client_state::MockClientState;
 use crate::Height;
 
 pub const TENDERMINT_CLIENT_STATE_TYPE_URL: &str = "/ibc.lightclients.tendermint.v1.ClientState";
+pub const WASM_CLIENT_STATE_TYPE_URL: &str = "/ibc.lightclients.wasm.v1.ClientState";
 pub const MOCK_CLIENT_STATE_TYPE_URL: &str = "/ibc.mock.ClientState";
 
 pub trait ClientState: Clone + core::fmt::Debug + Send + Sync {
@@ -43,7 +45,8 @@ pub trait ClientState: Clone + core::fmt::Debug + Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AnyClientState {
-    Tendermint(client_state::ClientState),
+    Tendermint(TMClientState),
+    Wasm(WasmClientState),
 
     #[cfg(any(test, feature = "mocks"))]
     Mock(MockClientState),
@@ -53,6 +56,7 @@ impl AnyClientState {
     pub fn latest_height(&self) -> Height {
         match self {
             Self::Tendermint(tm_state) => tm_state.latest_height(),
+            Self::Wasm(state) => state.latest_height(),
 
             #[cfg(any(test, feature = "mocks"))]
             Self::Mock(mock_state) => mock_state.latest_height(),
@@ -62,6 +66,7 @@ impl AnyClientState {
     pub fn trust_threshold(&self) -> Option<TrustThreshold> {
         match self {
             AnyClientState::Tendermint(state) => Some(state.trust_level),
+            AnyClientState::Wasm(_) => Some(TrustThreshold::new(1, 1).unwrap()),
 
             #[cfg(any(test, feature = "mocks"))]
             AnyClientState::Mock(_) => None,
@@ -71,6 +76,7 @@ impl AnyClientState {
     pub fn client_type(&self) -> ClientType {
         match self {
             Self::Tendermint(state) => state.client_type(),
+            Self::Wasm(state) => state.client_type(),
 
             #[cfg(any(test, feature = "mocks"))]
             Self::Mock(state) => state.client_type(),
@@ -79,16 +85,18 @@ impl AnyClientState {
 
     pub fn refresh_period(&self) -> Option<Duration> {
         match self {
-            AnyClientState::Tendermint(tm_state) => tm_state.refresh_time(),
+            AnyClientState::Tendermint(state) => state.refresh_time(),
+            AnyClientState::Wasm(_) => Some(Duration::MAX),
 
             #[cfg(any(test, feature = "mocks"))]
-            AnyClientState::Mock(mock_state) => mock_state.refresh_time(),
+            AnyClientState::Mock(state) => state.refresh_time(),
         }
     }
 
     pub fn expired(&self, elapsed_since_latest: Duration) -> bool {
         match self {
             AnyClientState::Tendermint(tm_state) => tm_state.expired(elapsed_since_latest),
+            AnyClientState::Wasm(_) => false,
 
             #[cfg(any(test, feature = "mocks"))]
             AnyClientState::Mock(mock_state) => mock_state.expired(elapsed_since_latest),
@@ -106,7 +114,12 @@ impl TryFrom<Any> for AnyClientState {
             "" => Err(Error::empty_client_state_response()),
 
             TENDERMINT_CLIENT_STATE_TYPE_URL => Ok(AnyClientState::Tendermint(
-                client_state::ClientState::decode_vec(&raw.value)
+                TMClientState::decode_vec(&raw.value)
+                    .map_err(Error::decode_raw_client_state)?,
+            )),
+
+            WASM_CLIENT_STATE_TYPE_URL => Ok(AnyClientState::Wasm(
+                WasmClientState::decode_vec(&raw.value)
                     .map_err(Error::decode_raw_client_state)?,
             )),
 
@@ -129,6 +142,12 @@ impl From<AnyClientState> for Any {
                     .encode_vec()
                     .expect("encoding to `Any` from `AnyClientState::Tendermint`"),
             },
+            AnyClientState::Wasm(value) => Any {
+                type_url: WASM_CLIENT_STATE_TYPE_URL.to_string(),
+                value: value
+                    .encode_vec()
+                    .expect("encoding to `Any` from `AnyClientState::Wasm`"),
+            },
             #[cfg(any(test, feature = "mocks"))]
             AnyClientState::Mock(value) => Any {
                 type_url: MOCK_CLIENT_STATE_TYPE_URL.to_string(),
@@ -144,6 +163,7 @@ impl ClientState for AnyClientState {
     fn chain_id(&self) -> ChainId {
         match self {
             AnyClientState::Tendermint(tm_state) => tm_state.chain_id(),
+            AnyClientState::Wasm(state) => state.chain_id(),
 
             #[cfg(any(test, feature = "mocks"))]
             AnyClientState::Mock(mock_state) => mock_state.chain_id(),
@@ -161,6 +181,7 @@ impl ClientState for AnyClientState {
     fn is_frozen(&self) -> bool {
         match self {
             AnyClientState::Tendermint(tm_state) => tm_state.is_frozen(),
+            AnyClientState::Wasm(state) => state.is_frozen(),
 
             #[cfg(any(test, feature = "mocks"))]
             AnyClientState::Mock(mock_state) => mock_state.is_frozen(),

@@ -225,6 +225,7 @@ impl MockContext {
                 // Return the tuple.
                 (Some(client_state), consensus_state)
             }
+            _ => {todo!()}
         };
         let consensus_states = vec![(cs_height, consensus_state)].into_iter().collect();
 

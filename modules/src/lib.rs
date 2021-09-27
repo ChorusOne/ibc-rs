@@ -2,7 +2,6 @@
 // https://github.com/informalsystems/ibc-rs/issues/987
 // #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
-#![no_std]
 #![allow(clippy::large_enum_variant)]
 #![deny(
     warnings,
@@ -26,11 +25,11 @@
 //! - ICS 23: Vector Commitment Scheme
 //! - ICS 24: Host Requirements
 //! - ICS 26: Routing
+//! - ICS 28: Wasm
 //! - Applications:
 //!    - ICS 20: Fungible Token Transfer
 
 extern crate alloc;
-extern crate std;
 
 mod prelude;
 
@@ -54,6 +53,7 @@ pub mod ics18_relayer;
 pub mod ics23_commitment;
 pub mod ics24_host;
 pub mod ics26_routing;
+pub mod ics28_wasm;
 
 mod serializers;
 
