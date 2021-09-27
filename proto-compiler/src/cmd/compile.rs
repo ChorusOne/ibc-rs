@@ -103,6 +103,11 @@ impl CompileCmd {
 
         let compilation = tonic_build::configure()
             .build_client(true)
+            .client_mod_attribute(".", "#[cfg(feature = \"client\")]")
+            .type_attribute(".ibc.lightclients.wasm.*", "#[derive(schemars::JsonSchema)]")
+            .type_attribute(".ibc.core.client.v1.Height", "#[derive(Eq,PartialOrd, Ord, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]")
+            .type_attribute(".ibc.core.commitment.v1.MerkleProof", "#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]")
+            .type_attribute(".ics23", "#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]")
             .build_server(false)
             .format(true)
             .out_dir(out_dir)
@@ -148,7 +153,7 @@ impl CompileCmd {
 
         if let Some(ibc_dir) = ibc_dep {
             // Use the IBC proto files from the SDK
-            proto_includes_paths.push(format!("{}/proto", ibc_dir.display()),);
+            proto_includes_paths.push(format!("{}/proto", ibc_dir.display()));
         }
 
         // List available proto files
@@ -181,6 +186,7 @@ impl CompileCmd {
 
         let compilation = tonic_build::configure()
             .build_client(true)
+            .client_mod_attribute(".", "#[cfg(feature = \"client\")]")
             .build_server(false)
             .format(true)
             .out_dir(out_dir)

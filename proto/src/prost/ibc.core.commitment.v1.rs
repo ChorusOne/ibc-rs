@@ -26,7 +26,9 @@ pub struct MerklePath {
 /// elements, verifiable in conjunction with a known commitment root. Proofs
 /// should be succinct.
 /// MerkleProofs are ordered from leaf-to-root
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(
+    serde::Serialize, serde::Deserialize, schemars::JsonSchema, Clone, PartialEq, ::prost::Message,
+)]
 pub struct MerkleProof {
     #[prost(message, repeated, tag = "1")]
     pub proofs: ::prost::alloc::vec::Vec<super::super::super::super::ics23::CommitmentProof>,

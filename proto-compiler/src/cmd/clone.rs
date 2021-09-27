@@ -1,4 +1,4 @@
-use core::{path::PathBuf, process};
+use std::path::PathBuf;
 
 use git2::{Oid, Repository};
 
@@ -26,13 +26,13 @@ pub struct CloneCmd {
 }
 
 pub const COSMOS_SDK_URL: &str = "https://github.com/cosmos/cosmos-sdk";
-pub const IBC_GO_URL: &str = "https://github.com/cosmos/ibc-go";
+pub const IBC_GO_URL: &str = "https://github.com/ChorusOne/ibc-go";
 
 impl CloneCmd {
     pub fn validate(&self) {
         if self.sdk_commit.is_some() && self.sdk_tag.is_some() {
             println!("[error] The --sdk-commit and --sdk-tag options are mutually exclusive.");
-            process::exit(1);
+            std::process::exit(1);
         }
     }
 
@@ -60,14 +60,14 @@ impl CloneCmd {
 
             Repository::open(&sdk_path).unwrap_or_else(|e| {
                 println!("[error] Failed to open repository: {}", e);
-                process::exit(1)
+                std::process::exit(1)
             })
         } else {
             println!("[info ] Cloning cosmos/cosmos-sdk repository...");
 
             let repo = Repository::clone(COSMOS_SDK_URL, &sdk_path).unwrap_or_else(|e| {
                 println!("[error] Failed to clone the SDK repository: {}", e);
-                process::exit(1)
+                std::process::exit(1)
             });
 
             println!("[info ] Cloned at '{}'", sdk_path.display());
@@ -78,12 +78,12 @@ impl CloneCmd {
         if let Some(ref rev) = self.sdk_commit {
             checkout_commit(&sdk_repo, rev).unwrap_or_else(|e| {
                 println!("[error] Failed to checkout SDK commit {}: {}", rev, e);
-                process::exit(1)
+                std::process::exit(1)
             });
         } else if let Some(ref tag) = self.sdk_tag {
             checkout_tag(&sdk_repo, tag).unwrap_or_else(|e| {
                 println!("[error] Failed to checkout SDK tag {}: {}", tag, e);
-                process::exit(1)
+                std::process::exit(1)
             });
         }
 
@@ -97,12 +97,12 @@ impl CloneCmd {
 
                     Repository::open(&ibc_path).unwrap_or_else(|e| {
                         println!("[error] Failed to open repository: {}", e);
-                        process::exit(1)
+                        std::process::exit(1)
                     })
                 } else {
                     Repository::clone(IBC_GO_URL, &ibc_path).unwrap_or_else(|e| {
                         println!("[error] Failed to clone the IBC Go repository: {}", e);
-                        process::exit(1)
+                        std::process::exit(1)
                     })
                 };
 
@@ -112,7 +112,7 @@ impl CloneCmd {
                         "[error] Failed to checkout IBC Go commit {}: {}",
                         ibc_go_commit, e
                     );
-                    process::exit(1)
+                    std::process::exit(1)
                 });
             }
             None => {
@@ -169,7 +169,7 @@ fn checkout_tag(repo: &Repository, tag_name: &str) -> Result<(), git2::Error> {
         println!("[info ] Checked out tag {}", tag_name);
     } else {
         println!("[error] Could not find tag {}", tag_name);
-        process::exit(1);
+        std::process::exit(1);
     }
 
     Ok(())
