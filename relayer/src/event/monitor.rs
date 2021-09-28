@@ -81,6 +81,10 @@ define_error! {
         Rpc
             [ TraceError<RpcError> ]
             |_| { "RPC error" },
+
+        Web3Rpc
+            [ TraceError<web3::Error> ]
+            |_| { "Web3 RPC error" },
     }
 }
 

@@ -190,8 +190,8 @@ impl Runnable for TxUpgradeClientsCmd {
             .chains
             .iter()
             .filter_map(|chain| {
-                (self.src_chain_id != chain.id)
-                    .then(|| self.upgrade_clients_for_chain(&config, src_chain.clone(), &chain.id))
+                (self.src_chain_id != *chain.id())
+                    .then(|| self.upgrade_clients_for_chain(&config, src_chain.clone(), chain.id()))
             })
             .collect();
 

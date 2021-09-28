@@ -71,7 +71,7 @@ use ibc_proto::ibc::core::connection::v1::{
     QueryClientConnectionsRequest, QueryConnectionsRequest,
 };
 
-use crate::config::{AddressType, ChainConfig, GasPrice};
+use crate::config::{AddressType, TMChainConfig, GasPrice};
 use crate::error::Error;
 use crate::event::monitor::{EventMonitor, EventReceiver};
 use crate::keyring::{KeyEntry, KeyRing, Store};
@@ -80,7 +80,7 @@ use crate::light_client::LightClient;
 use crate::light_client::Verified;
 use crate::{chain::QueryResponse, event::monitor::TxMonitorCmd};
 
-use super::{ChainEndpoint, HealthCheck};
+use super::{ChainEndpoint, HealthCheck, MinimalChainEndpoint};
 
 mod compatibility;
 
@@ -106,7 +106,7 @@ mod retry_strategy {
 }
 
 pub struct CosmosSdkChain {
-    config: ChainConfig,
+    config: TMChainConfig,
     rpc_client: HttpClient,
     grpc_addr: Uri,
     rt: Arc<TokioRuntime>,
@@ -188,7 +188,7 @@ impl CosmosSdkChain {
         &self.rpc_client
     }
 
-    pub fn config(&self) -> &ChainConfig {
+    pub fn config(&self) -> &TMChainConfig {
         &self.config
     }
 
@@ -611,86 +611,10 @@ fn all_tx_results_found(tx_sync_results: &[TxSyncResult]) -> bool {
         .all(|r| !empty_event_present(&r.events))
 }
 
-impl ChainEndpoint for CosmosSdkChain {
-    type LightBlock = TMLightBlock;
-    type Header = TmHeader;
-    type ConsensusState = AnyConsensusState;
-    type ClientState = AnyClientState;
-    type LightClient = TmLightClient;
-
-    fn bootstrap(config: ChainConfig, rt: Arc<TokioRuntime>) -> Result<Self, Error> {
-        let rpc_client = HttpClient::new(config.rpc_addr.clone())
-            .map_err(|e| Error::rpc(config.rpc_addr.clone(), e))?;
-
-        // Initialize key store and load key
-        let keybase = KeyRing::new(Store::Test, &config.account_prefix, &config.id)
-            .map_err(Error::key_base)?;
-
-        let grpc_addr = Uri::from_str(&config.grpc_addr.to_string())
-            .map_err(|e| Error::invalid_uri(config.grpc_addr.to_string(), e))?;
-
-        let chain = Self {
-            config,
-            rpc_client,
-            grpc_addr,
-            rt,
-            keybase,
-            account: None,
-        };
-
-        Ok(chain)
-    }
-
-    fn init_light_client(&self) -> Result<Self::LightClient, Error> {
-        use tendermint_light_client::types::PeerId;
-
-        crate::time!("init_light_client");
-
-        let peer_id: PeerId = self
-            .rt
-            .block_on(self.rpc_client.status())
-            .map(|s| s.node_info.id)
-            .map_err(|e| Error::rpc(self.config.rpc_addr.clone(), e))?;
-
-        let light_client = TmLightClient::from_config(&self.config, peer_id)?;
-
-        Ok(light_client)
-    }
-
-    fn init_event_monitor(
-        &self,
-        rt: Arc<TokioRuntime>,
-    ) -> Result<(EventReceiver, TxMonitorCmd), Error> {
-        crate::time!("init_event_monitor");
-
-        let (mut event_monitor, event_receiver, monitor_tx) = EventMonitor::new(
-            self.config.id.clone(),
-            self.config.websocket_addr.clone(),
-            rt,
-        )
-        .map_err(Error::event_monitor)?;
-
-        event_monitor.subscribe().map_err(Error::event_monitor)?;
-
-        thread::spawn(move || event_monitor.run());
-
-        Ok((event_receiver, monitor_tx))
-    }
-
-    fn shutdown(self) -> Result<(), Error> {
-        Ok(())
-    }
+impl MinimalChainEndpoint for CosmosSdkChain {
 
     fn id(&self) -> &ChainId {
         &self.config().id
-    }
-
-    fn keybase(&self) -> &KeyRing {
-        &self.keybase
-    }
-
-    fn keybase_mut(&mut self) -> &mut KeyRing {
-        &mut self.keybase
     }
 
     /// Does multiple RPC calls to the full node, to check for
@@ -722,6 +646,279 @@ impl ChainEndpoint for CosmosSdkChain {
         }
 
         Ok(HealthCheck::Healthy)
+    }
+
+    fn keybase(&self) -> &KeyRing {
+        &self.keybase
+    }
+
+    fn keybase_mut(&mut self) -> &mut KeyRing {
+        &mut self.keybase
+    }
+
+    /// Get the account for the signer
+    fn get_signer(&mut self) -> Result<Signer, Error> {
+        crate::time!("get_signer");
+
+        // Get the key from key seed file
+        let key = self
+            .keybase()
+            .get_key(&self.config.key_name)
+            .map_err(Error::key_base)?;
+
+        let bech32 = encode_to_bech32(&key.address.to_hex(), &self.config.account_prefix)?;
+        Ok(Signer::new(bech32))
+    }
+
+    /// Get the signing key
+    fn get_key(&mut self) -> Result<KeyEntry, Error> {
+        crate::time!("get_key");
+
+        // Get the key from key seed file
+        let key = self
+            .keybase()
+            .get_key(&self.config.key_name)
+            .map_err(Error::key_base)?;
+
+        Ok(key)
+    }
+
+   /// This function queries transactions for events matching certain criteria.
+    /// 1. Client Update request - returns a vector with at most one update client event
+    /// 2. Packet event request - returns at most one packet event for each sequence specified
+    ///    in the request.
+    ///    Note - there is no way to format the packet query such that it asks for Tx-es with either
+    ///    sequence (the query conditions can only be AND-ed).
+    ///    There is a possibility to include "<=" and ">=" conditions but it doesn't work with
+    ///    string attributes (sequence is emmitted as a string).
+    ///    Therefore, for packets we perform one tx_search for each sequence.
+    ///    Alternatively, a single query for all packets could be performed but it would return all
+    ///    packets ever sent.
+    fn query_txs(&self, request: QueryTxRequest) -> Result<Vec<IbcEvent>, Error> {
+        crate::time!("query_txs");
+
+        match request {
+            QueryTxRequest::Packet(request) => {
+                crate::time!("query_txs: query packet events");
+
+                let mut result: Vec<IbcEvent> = vec![];
+
+                for seq in &request.sequences {
+                    // query first (and only) Tx that includes the event specified in the query request
+                    let response = self
+                        .block_on(self.rpc_client.tx_search(
+                            packet_query(&request, *seq),
+                            false,
+                            1,
+                            1, // get only the first Tx matching the query
+                            Order::Ascending,
+                        ))
+                        .map_err(|e| Error::rpc(self.config.rpc_addr.clone(), e))?;
+
+                    assert!(
+                        response.txs.len() <= 1,
+                        "packet_from_tx_search_response: unexpected number of txs"
+                    );
+
+                    if response.txs.is_empty() {
+                        continue;
+                    }
+
+                    if let Some(event) = packet_from_tx_search_response(
+                        self.id(),
+                        &request,
+                        *seq,
+                        response.txs[0].clone(),
+                    ) {
+                        result.push(event);
+                    }
+                }
+                Ok(result)
+            }
+
+            QueryTxRequest::Client(request) => {
+                crate::time!("query_txs: single client update event");
+
+                // query the first Tx that includes the event matching the client request
+                // Note: it is possible to have multiple Tx-es for same client and consensus height.
+                // In this case it must be true that the client updates were performed with tha
+                // same header as the first one, otherwise a subsequent transaction would have
+                // failed on chain. Therefore only one Tx is of interest and current API returns
+                // the first one.
+                let mut response = self
+                    .block_on(self.rpc_client.tx_search(
+                        header_query(&request),
+                        false,
+                        1,
+                        1, // get only the first Tx matching the query
+                        Order::Ascending,
+                    ))
+                    .map_err(|e| Error::rpc(self.config.rpc_addr.clone(), e))?;
+
+                if response.txs.is_empty() {
+                    return Ok(vec![]);
+                }
+
+                // the response must include a single Tx as specified in the query.
+                assert!(
+                    response.txs.len() <= 1,
+                    "packet_from_tx_search_response: unexpected number of txs"
+                );
+
+                let tx = response.txs.remove(0);
+                let event = update_client_from_tx_search_response(self.id(), &request, tx);
+
+                Ok(event.into_iter().collect())
+            }
+
+            QueryTxRequest::Transaction(tx) => {
+                let mut response = self
+                    .block_on(self.rpc_client.tx_search(
+                        tx_hash_query(&tx),
+                        false,
+                        1,
+                        1, // get only the first Tx matching the query
+                        Order::Ascending,
+                    ))
+                    .map_err(|e| Error::rpc(self.config.rpc_addr.clone(), e))?;
+
+                if response.txs.is_empty() {
+                    Ok(vec![])
+                } else {
+                    let tx = response.txs.remove(0);
+                    Ok(all_ibc_events_from_tx_search_response(self.id(), tx))
+                }
+            }
+        }
+    }
+
+    /// Query the latest height the chain is at via a RPC query
+    fn query_latest_height(&self) -> Result<ICSHeight, Error> {
+        crate::time!("query_latest_height");
+
+        let status = self
+            .block_on(self.rpc_client().status())
+            .map_err(|e| Error::rpc(self.config.rpc_addr.clone(), e))?;
+
+        if status.sync_info.catching_up {
+            return Err(Error::chain_not_caught_up(
+                self.config.rpc_addr.to_string(),
+                self.config().id.clone(),
+            ));
+        }
+
+        Ok(ICSHeight {
+            revision_number: ChainId::chain_version(status.node_info.network.as_str()),
+            revision_height: u64::from(status.sync_info.latest_block_height),
+        })
+    }
+
+    fn query_client_state(
+        &self,
+        client_id: &ClientId,
+        height: ICSHeight,
+    ) -> Result<AnyClientState, Error> {
+        crate::time!("query_client_state");
+
+        let client_state = self
+            .query(ClientStatePath(client_id.clone()), height, false)
+            .and_then(|v| AnyClientState::decode_vec(&v.value).map_err(Error::decode))?;
+        println!(
+            "giulio - CosmosSdkChain::query_client_state - {:?} - {} - {}",
+            client_id,
+            height,
+            client_state.latest_height()
+        );
+        Ok(client_state)
+    }
+
+    fn query_clients(
+        &self,
+        request: QueryClientStatesRequest,
+    ) -> Result<Vec<IdentifiedAnyClientState>, Error> {
+        crate::time!("query_clients");
+
+        let mut client = self
+            .block_on(
+                ibc_proto::ibc::core::client::v1::query_client::QueryClient::connect(
+                    self.grpc_addr.clone(),
+                ),
+            )
+            .map_err(Error::grpc_transport)?;
+
+        let request = tonic::Request::new(request);
+        let response = self
+            .block_on(client.client_states(request))
+            .map_err(Error::grpc_status)?
+            .into_inner();
+
+        // Deserialize into domain type
+        let mut clients: Vec<IdentifiedAnyClientState> = response
+            .client_states
+            .into_iter()
+            .filter_map(|cs| IdentifiedAnyClientState::try_from(cs).ok())
+            .collect();
+
+        // Sort by client identifier counter
+        clients.sort_by(|a, b| {
+            client_id_suffix(&a.client_id)
+                .unwrap_or(0) // Fallback to `0` suffix (no sorting) if client id is malformed
+                .cmp(&client_id_suffix(&b.client_id).unwrap_or(0))
+        });
+
+        Ok(clients)
+    }
+
+    /// Performs a query to retrieve the identifiers of all connections.
+    fn query_consensus_states(
+        &self,
+        request: QueryConsensusStatesRequest,
+    ) -> Result<Vec<AnyConsensusStateWithHeight>, Error> {
+        crate::time!("query_consensus_states");
+
+        println!(
+            "giulio CosmosSdkChain::query_consensus_states {:?}",
+            request
+        );
+        let mut client = self
+            .block_on(
+                ibc_proto::ibc::core::client::v1::query_client::QueryClient::connect(
+                    self.grpc_addr.clone(),
+                ),
+            )
+            .map_err(Error::grpc_transport)?;
+
+        let request = tonic::Request::new(request);
+        let response = self
+            .block_on(client.consensus_states(request))
+            .map_err(Error::grpc_status)?
+            .into_inner();
+
+        let mut consensus_states: Vec<AnyConsensusStateWithHeight> = response
+            .consensus_states
+            .into_iter()
+            .filter_map(|cs| TryFrom::try_from(cs).ok())
+            .collect();
+        consensus_states.sort_by(|a, b| a.height.cmp(&b.height));
+        consensus_states.reverse();
+
+        println!("giulio CosmosSdkChain::query_consensus_states result {:?}", consensus_states.len());
+        println!("giulio CosmosSdkChain::query_consensus_states result {:?}", consensus_states.first().unwrap().height);
+        Ok(consensus_states)
+    }
+
+    fn query_consensus_state(
+        &self,
+        client_id: ClientId,
+        consensus_height: ICSHeight,
+        query_height: ICSHeight,
+    ) -> Result<AnyConsensusState, Error> {
+        crate::time!("query_consensus_state");
+
+        let consensus_state = self
+            .proven_client_consensus(&client_id, consensus_height, query_height)?
+            .0;
+        Ok(consensus_state)
     }
 
     /// Send one or more transactions that include all the specified messages.
@@ -788,260 +985,7 @@ impl ChainEndpoint for CosmosSdkChain {
         Ok(events)
     }
 
-    fn send_messages_and_wait_check_tx(
-        &mut self,
-        proto_msgs: Vec<Any>,
-    ) -> Result<Vec<Response>, Error> {
-        crate::time!("send_messages_and_wait_check_tx");
-        debug!(
-            "send_messages_and_wait_check_tx with {} messages",
-            proto_msgs.len()
-        );
-
-        if proto_msgs.is_empty() {
-            return Ok(vec![]);
-        }
-        let mut responses = vec![];
-
-        let mut n = 0;
-        let mut size = 0;
-        let mut msg_batch = vec![];
-        for msg in proto_msgs.iter() {
-            msg_batch.push(msg.clone());
-            let mut buf = Vec::new();
-            prost::Message::encode(msg, &mut buf).unwrap();
-            n += 1;
-            size += buf.len();
-            if n >= self.max_msg_num() || size >= self.max_tx_size() {
-                // Send the tx and enqueue the resulting response
-                responses.push(self.send_tx(msg_batch)?);
-                n = 0;
-                size = 0;
-                msg_batch = vec![];
-            }
-        }
-        if !msg_batch.is_empty() {
-            responses.push(self.send_tx(msg_batch)?);
-        }
-
-        Ok(responses)
-    }
-
-    /// Get the account for the signer
-    fn get_signer(&mut self) -> Result<Signer, Error> {
-        crate::time!("get_signer");
-
-        // Get the key from key seed file
-        let key = self
-            .keybase()
-            .get_key(&self.config.key_name)
-            .map_err(Error::key_base)?;
-
-        let bech32 = encode_to_bech32(&key.address.to_hex(), &self.config.account_prefix)?;
-        Ok(Signer::new(bech32))
-    }
-
-    /// Get the signing key
-    fn get_key(&mut self) -> Result<KeyEntry, Error> {
-        crate::time!("get_key");
-
-        // Get the key from key seed file
-        let key = self
-            .keybase()
-            .get_key(&self.config.key_name)
-            .map_err(Error::key_base)?;
-
-        Ok(key)
-    }
-
-    fn query_commitment_prefix(&self) -> Result<CommitmentPrefix, Error> {
-        crate::time!("query_commitment_prefix");
-
-        // TODO - do a real chain query
-        Ok(CommitmentPrefix::from(
-            self.config().store_prefix.as_bytes().to_vec(),
-        ))
-    }
-
-    /// Query the latest height the chain is at via a RPC query
-    fn query_latest_height(&self) -> Result<ICSHeight, Error> {
-        crate::time!("query_latest_height");
-
-        let status = self
-            .block_on(self.rpc_client().status())
-            .map_err(|e| Error::rpc(self.config.rpc_addr.clone(), e))?;
-
-        if status.sync_info.catching_up {
-            return Err(Error::chain_not_caught_up(
-                self.config.rpc_addr.to_string(),
-                self.config().id.clone(),
-            ));
-        }
-
-        Ok(ICSHeight {
-            revision_number: ChainId::chain_version(status.node_info.network.as_str()),
-            revision_height: u64::from(status.sync_info.latest_block_height),
-        })
-    }
-
-    fn query_clients(
-        &self,
-        request: QueryClientStatesRequest,
-    ) -> Result<Vec<IdentifiedAnyClientState>, Error> {
-        crate::time!("query_clients");
-
-        let mut client = self
-            .block_on(
-                ibc_proto::ibc::core::client::v1::query_client::QueryClient::connect(
-                    self.grpc_addr.clone(),
-                ),
-            )
-            .map_err(Error::grpc_transport)?;
-
-        let request = tonic::Request::new(request);
-        let response = self
-            .block_on(client.client_states(request))
-            .map_err(Error::grpc_status)?
-            .into_inner();
-
-        // Deserialize into domain type
-        let mut clients: Vec<IdentifiedAnyClientState> = response
-            .client_states
-            .into_iter()
-            .filter_map(|cs| IdentifiedAnyClientState::try_from(cs).ok())
-            .collect();
-
-        // Sort by client identifier counter
-        clients.sort_by(|a, b| {
-            client_id_suffix(&a.client_id)
-                .unwrap_or(0) // Fallback to `0` suffix (no sorting) if client id is malformed
-                .cmp(&client_id_suffix(&b.client_id).unwrap_or(0))
-        });
-
-        Ok(clients)
-    }
-
-    fn query_client_state(
-        &self,
-        client_id: &ClientId,
-        height: ICSHeight,
-    ) -> Result<AnyClientState, Error> {
-        crate::time!("query_client_state");
-
-        let client_state = self
-            .query(ClientStatePath(client_id.clone()), height, false)
-            .and_then(|v| AnyClientState::decode_vec(&v.value).map_err(Error::decode))?;
-        println!(
-            "giulio - CosmosSdkChain::query_client_state - {:?} - {} - {}",
-            client_id,
-            height,
-            client_state.latest_height()
-        );
-        Ok(client_state)
-    }
-
-    fn query_upgraded_client_state(
-        &self,
-        height: ICSHeight,
-    ) -> Result<(Self::ClientState, MerkleProof), Error> {
-        crate::time!("query_upgraded_client_state");
-
-        // Query for the value and the proof.
-        let tm_height = Height::try_from(height.revision_height).map_err(Error::invalid_height)?;
-        let (upgraded_client_state_raw, proof) = self.query_client_upgrade_state(
-            ClientUpgradePath::UpgradedClientState(height.revision_height),
-            tm_height,
-        )?;
-
-        let client_state = AnyClientState::decode_vec(&upgraded_client_state_raw)
-            .map_err(Error::conversion_from_any)?;
-
-        let client_type = client_state.client_type();
-        let tm_client_state = downcast!(client_state => AnyClientState::Tendermint)
-            .ok_or_else(|| Error::client_type_mismatch(ClientType::Tendermint, client_type))?;
-
-        Ok((tm_client_state.wrap_any(), proof))
-    }
-
-    fn query_upgraded_consensus_state(
-        &self,
-        height: ICSHeight,
-    ) -> Result<(Self::ConsensusState, MerkleProof), Error> {
-        crate::time!("query_upgraded_consensus_state");
-
-        let tm_height = Height::try_from(height.revision_height).map_err(Error::invalid_height)?;
-
-        // Fetch the consensus state and its proof.
-        let (upgraded_consensus_state_raw, proof) = self.query_client_upgrade_state(
-            ClientUpgradePath::UpgradedClientConsensusState(height.revision_height),
-            tm_height,
-        )?;
-
-        let consensus_state = AnyConsensusState::decode_vec(&upgraded_consensus_state_raw)
-            .map_err(Error::conversion_from_any)?;
-
-        let cs_client_type = consensus_state.client_type();
-        let tm_consensus_state = downcast!(consensus_state => AnyConsensusState::Tendermint)
-            .ok_or_else(|| {
-                Error::consensus_state_type_mismatch(ClientType::Tendermint, cs_client_type)
-            })?;
-
-        Ok((tm_consensus_state.wrap_any(), proof))
-    }
-
-    /// Performs a query to retrieve the identifiers of all connections.
-    fn query_consensus_states(
-        &self,
-        request: QueryConsensusStatesRequest,
-    ) -> Result<Vec<AnyConsensusStateWithHeight>, Error> {
-        crate::time!("query_consensus_states");
-
-        println!(
-            "giulio CosmosSdkChain::query_consensus_states {:?}",
-            request
-        );
-        let mut client = self
-            .block_on(
-                ibc_proto::ibc::core::client::v1::query_client::QueryClient::connect(
-                    self.grpc_addr.clone(),
-                ),
-            )
-            .map_err(Error::grpc_transport)?;
-
-        let request = tonic::Request::new(request);
-        let response = self
-            .block_on(client.consensus_states(request))
-            .map_err(Error::grpc_status)?
-            .into_inner();
-
-        let mut consensus_states: Vec<AnyConsensusStateWithHeight> = response
-            .consensus_states
-            .into_iter()
-            .filter_map(|cs| TryFrom::try_from(cs).ok())
-            .collect();
-        consensus_states.sort_by(|a, b| a.height.cmp(&b.height));
-        consensus_states.reverse();
-
-        println!("giulio CosmosSdkChain::query_consensus_states result {:?}", consensus_states.len());
-        println!("giulio CosmosSdkChain::query_consensus_states result {:?}", consensus_states.first().unwrap().height);
-        Ok(consensus_states)
-    }
-
-    fn query_consensus_state(
-        &self,
-        client_id: ClientId,
-        consensus_height: ICSHeight,
-        query_height: ICSHeight,
-    ) -> Result<AnyConsensusState, Error> {
-        crate::time!("query_consensus_state");
-
-        let consensus_state = self
-            .proven_client_consensus(&client_id, consensus_height, query_height)?
-            .0;
-        Ok(consensus_state)
-    }
-
-    fn query_client_connections(
+   fn query_client_connections(
         &self,
         request: QueryClientConnectionsRequest,
     ) -> Result<Vec<ConnectionId>, Error> {
@@ -1197,6 +1141,194 @@ impl ChainEndpoint for CosmosSdkChain {
         Ok(channels)
     }
 
+    fn query_channel(
+        &self,
+        port_id: &PortId,
+        channel_id: &ChannelId,
+        height: ICSHeight,
+    ) -> Result<ChannelEnd, Error> {
+        let res = self.query(
+            Path::ChannelEnds(port_id.clone(), channel_id.clone()),
+            height,
+            false,
+        )?;
+        let channel_end = ChannelEnd::decode_vec(&res.value).map_err(Error::decode)?;
+
+        Ok(channel_end)
+    }
+}
+
+impl ChainEndpoint for CosmosSdkChain {
+    type ChainConfig = TMChainConfig;
+    type LightBlock = TMLightBlock;
+    type Header = TmHeader;
+    type ConsensusState = AnyConsensusState;
+    type ClientState = AnyClientState;
+    type LightClient = TmLightClient;
+
+    fn bootstrap(config: TMChainConfig, rt: Arc<TokioRuntime>) -> Result<Self, Error> {
+        let rpc_client = HttpClient::new(config.rpc_addr.clone())
+            .map_err(|e| Error::rpc(config.rpc_addr.clone(), e))?;
+
+        // Initialize key store and load key
+        let keybase = KeyRing::new(Store::Test, &config.account_prefix, &config.id)
+            .map_err(Error::key_base)?;
+
+        let grpc_addr = Uri::from_str(&config.grpc_addr.to_string())
+            .map_err(|e| Error::invalid_uri(config.grpc_addr.to_string(), e))?;
+
+        let chain = Self {
+            config,
+            rpc_client,
+            grpc_addr,
+            rt,
+            keybase,
+            account: None,
+        };
+
+        Ok(chain)
+    }
+
+    fn init_light_client(&self) -> Result<Self::LightClient, Error> {
+        use tendermint_light_client::types::PeerId;
+
+        crate::time!("init_light_client");
+
+        let peer_id: PeerId = self
+            .rt
+            .block_on(self.rpc_client.status())
+            .map(|s| s.node_info.id)
+            .map_err(|e| Error::rpc(self.config.rpc_addr.clone(), e))?;
+
+        let light_client = TmLightClient::from_config(&self.config, peer_id)?;
+
+        Ok(light_client)
+    }
+
+    fn init_event_monitor(
+        &self,
+        rt: Arc<TokioRuntime>,
+    ) -> Result<(EventReceiver, TxMonitorCmd), Error> {
+        crate::time!("init_event_monitor");
+
+        let (mut event_monitor, event_receiver, monitor_tx) = EventMonitor::new(
+            self.config.id.clone(),
+            self.config.websocket_addr.clone(),
+            rt,
+        )
+        .map_err(Error::event_monitor)?;
+
+        event_monitor.subscribe().map_err(Error::event_monitor)?;
+
+        thread::spawn(move || event_monitor.run());
+
+        Ok((event_receiver, monitor_tx))
+    }
+
+    fn shutdown(self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn send_messages_and_wait_check_tx(
+        &mut self,
+        proto_msgs: Vec<Any>,
+    ) -> Result<Vec<Response>, Error> {
+        crate::time!("send_messages_and_wait_check_tx");
+        debug!(
+            "send_messages_and_wait_check_tx with {} messages",
+            proto_msgs.len()
+        );
+
+        if proto_msgs.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut responses = vec![];
+
+        let mut n = 0;
+        let mut size = 0;
+        let mut msg_batch = vec![];
+        for msg in proto_msgs.iter() {
+            msg_batch.push(msg.clone());
+            let mut buf = Vec::new();
+            prost::Message::encode(msg, &mut buf).unwrap();
+            n += 1;
+            size += buf.len();
+            if n >= self.max_msg_num() || size >= self.max_tx_size() {
+                // Send the tx and enqueue the resulting response
+                responses.push(self.send_tx(msg_batch)?);
+                n = 0;
+                size = 0;
+                msg_batch = vec![];
+            }
+        }
+        if !msg_batch.is_empty() {
+            responses.push(self.send_tx(msg_batch)?);
+        }
+
+        Ok(responses)
+    }
+
+    fn query_commitment_prefix(&self) -> Result<CommitmentPrefix, Error> {
+        crate::time!("query_commitment_prefix");
+
+        // TODO - do a real chain query
+        Ok(CommitmentPrefix::from(
+            self.config().store_prefix.as_bytes().to_vec(),
+        ))
+    }
+
+    fn query_upgraded_client_state(
+        &self,
+        height: ICSHeight,
+    ) -> Result<(Self::ClientState, MerkleProof), Error> {
+        crate::time!("query_upgraded_client_state");
+
+        // Query for the value and the proof.
+        let tm_height = Height::try_from(height.revision_height).map_err(Error::invalid_height)?;
+        let (upgraded_client_state_raw, proof) = self.query_client_upgrade_state(
+            ClientUpgradePath::UpgradedClientState(height.revision_height),
+            tm_height,
+        )?;
+
+        let client_state = AnyClientState::decode_vec(&upgraded_client_state_raw)
+            .map_err(Error::conversion_from_any)?;
+
+        let client_type = client_state.client_type();
+        let tm_client_state = downcast!(client_state => AnyClientState::Tendermint)
+            .ok_or_else(|| Error::client_type_mismatch(ClientType::Tendermint, client_type))?;
+
+        Ok((tm_client_state.wrap_any(), proof))
+    }
+
+    fn query_upgraded_consensus_state(
+        &self,
+        height: ICSHeight,
+    ) -> Result<(Self::ConsensusState, MerkleProof), Error> {
+        crate::time!("query_upgraded_consensus_state");
+
+        let tm_height = Height::try_from(height.revision_height).map_err(Error::invalid_height)?;
+
+        // Fetch the consensus state and its proof.
+        let (upgraded_consensus_state_raw, proof) = self.query_client_upgrade_state(
+            ClientUpgradePath::UpgradedClientConsensusState(height.revision_height),
+            tm_height,
+        )?;
+
+        let consensus_state = AnyConsensusState::decode_vec(&upgraded_consensus_state_raw)
+            .map_err(Error::conversion_from_any)?;
+
+        let cs_client_type = consensus_state.client_type();
+        let tm_consensus_state = downcast!(consensus_state => AnyConsensusState::Tendermint)
+            .ok_or_else(|| {
+                Error::consensus_state_type_mismatch(ClientType::Tendermint, cs_client_type)
+            })?;
+
+        Ok((tm_consensus_state.wrap_any(), proof))
+    }
+
+
+ 
+
     fn query_channels(
         &self,
         request: QueryChannelsRequest,
@@ -1224,22 +1356,6 @@ impl ChainEndpoint for CosmosSdkChain {
             .filter_map(|ch| IdentifiedChannelEnd::try_from(ch).ok())
             .collect();
         Ok(channels)
-    }
-
-    fn query_channel(
-        &self,
-        port_id: &PortId,
-        channel_id: &ChannelId,
-        height: ICSHeight,
-    ) -> Result<ChannelEnd, Error> {
-        let res = self.query(
-            Path::ChannelEnds(port_id.clone(), channel_id.clone()),
-            height,
-            false,
-        )?;
-        let channel_end = ChannelEnd::decode_vec(&res.value).map_err(Error::decode)?;
-
-        Ok(channel_end)
     }
 
     fn query_channel_client_state(
@@ -1408,115 +1524,6 @@ impl ChainEndpoint for CosmosSdkChain {
             .into_inner();
 
         Ok(Sequence::from(response.next_sequence_receive))
-    }
-
-    /// This function queries transactions for events matching certain criteria.
-    /// 1. Client Update request - returns a vector with at most one update client event
-    /// 2. Packet event request - returns at most one packet event for each sequence specified
-    ///    in the request.
-    ///    Note - there is no way to format the packet query such that it asks for Tx-es with either
-    ///    sequence (the query conditions can only be AND-ed).
-    ///    There is a possibility to include "<=" and ">=" conditions but it doesn't work with
-    ///    string attributes (sequence is emmitted as a string).
-    ///    Therefore, for packets we perform one tx_search for each sequence.
-    ///    Alternatively, a single query for all packets could be performed but it would return all
-    ///    packets ever sent.
-    fn query_txs(&self, request: QueryTxRequest) -> Result<Vec<IbcEvent>, Error> {
-        crate::time!("query_txs");
-
-        match request {
-            QueryTxRequest::Packet(request) => {
-                crate::time!("query_txs: query packet events");
-
-                let mut result: Vec<IbcEvent> = vec![];
-
-                for seq in &request.sequences {
-                    // query first (and only) Tx that includes the event specified in the query request
-                    let response = self
-                        .block_on(self.rpc_client.tx_search(
-                            packet_query(&request, *seq),
-                            false,
-                            1,
-                            1, // get only the first Tx matching the query
-                            Order::Ascending,
-                        ))
-                        .map_err(|e| Error::rpc(self.config.rpc_addr.clone(), e))?;
-
-                    assert!(
-                        response.txs.len() <= 1,
-                        "packet_from_tx_search_response: unexpected number of txs"
-                    );
-
-                    if response.txs.is_empty() {
-                        continue;
-                    }
-
-                    if let Some(event) = packet_from_tx_search_response(
-                        self.id(),
-                        &request,
-                        *seq,
-                        response.txs[0].clone(),
-                    ) {
-                        result.push(event);
-                    }
-                }
-                Ok(result)
-            }
-
-            QueryTxRequest::Client(request) => {
-                crate::time!("query_txs: single client update event");
-
-                // query the first Tx that includes the event matching the client request
-                // Note: it is possible to have multiple Tx-es for same client and consensus height.
-                // In this case it must be true that the client updates were performed with tha
-                // same header as the first one, otherwise a subsequent transaction would have
-                // failed on chain. Therefore only one Tx is of interest and current API returns
-                // the first one.
-                let mut response = self
-                    .block_on(self.rpc_client.tx_search(
-                        header_query(&request),
-                        false,
-                        1,
-                        1, // get only the first Tx matching the query
-                        Order::Ascending,
-                    ))
-                    .map_err(|e| Error::rpc(self.config.rpc_addr.clone(), e))?;
-
-                if response.txs.is_empty() {
-                    return Ok(vec![]);
-                }
-
-                // the response must include a single Tx as specified in the query.
-                assert!(
-                    response.txs.len() <= 1,
-                    "packet_from_tx_search_response: unexpected number of txs"
-                );
-
-                let tx = response.txs.remove(0);
-                let event = update_client_from_tx_search_response(self.id(), &request, tx);
-
-                Ok(event.into_iter().collect())
-            }
-
-            QueryTxRequest::Transaction(tx) => {
-                let mut response = self
-                    .block_on(self.rpc_client.tx_search(
-                        tx_hash_query(&tx),
-                        false,
-                        1,
-                        1, // get only the first Tx matching the query
-                        Order::Ascending,
-                    ))
-                    .map_err(|e| Error::rpc(self.config.rpc_addr.clone(), e))?;
-
-                if response.txs.is_empty() {
-                    Ok(vec![])
-                } else {
-                    let tx = response.txs.remove(0);
-                    Ok(all_ibc_events_from_tx_search_response(self.id(), tx))
-                }
-            }
-        }
     }
 
     fn proven_client_state(

@@ -1,20 +1,17 @@
 use alloc::sync::Arc;
-
+use ibc::ics02_client::client_state::ClientState;
 use abscissa_core::{Command, Options, Runnable};
 use tokio::runtime::Runtime as TokioRuntime;
 use tracing::debug;
 
 use ibc::events::IbcEventType;
 use ibc::ics02_client::client_consensus::QueryClientEventRequest;
-use ibc::ics02_client::client_state::ClientState;
 use ibc::ics24_host::identifier::ChainId;
 use ibc::ics24_host::identifier::ClientId;
 use ibc::query::QueryTxRequest;
 use ibc::Height;
 use ibc_proto::ibc::core::client::v1::QueryConsensusStatesRequest;
 use ibc_proto::ibc::core::connection::v1::QueryClientConnectionsRequest;
-use ibc_relayer::chain::ChainEndpoint;
-use ibc_relayer::chain::CosmosSdkChain;
 
 use crate::application::app_config;
 use crate::conclude::Output;
@@ -50,7 +47,7 @@ impl Runnable for QueryClientStateCmd {
         };
 
         let rt = Arc::new(TokioRuntime::new().unwrap());
-        let chain = CosmosSdkChain::bootstrap(chain_config.clone(), rt).unwrap();
+        let chain = ibc_relayer::util::chain::bootstrap_chain(chain_config.clone(), rt).unwrap();
         let height = ibc::Height::new(chain.id().version(), self.height.unwrap_or(0_u64));
 
         match chain.query_client_state(&self.client_id, height) {
@@ -102,7 +99,7 @@ impl Runnable for QueryClientConsensusCmd {
         debug!("Options: {:?}", self);
 
         let rt = Arc::new(TokioRuntime::new().unwrap());
-        let chain = CosmosSdkChain::bootstrap(chain_config.clone(), rt).unwrap();
+        let chain = ibc_relayer::util::chain::bootstrap_chain(chain_config.clone(), rt).unwrap();
 
         let counterparty_chain = match chain.query_client_state(&self.client_id, Height::zero()) {
             Ok(cs) => cs.chain_id(),
@@ -185,7 +182,7 @@ impl Runnable for QueryClientHeaderCmd {
         debug!("Options: {:?}", self);
 
         let rt = Arc::new(TokioRuntime::new().unwrap());
-        let chain = CosmosSdkChain::bootstrap(chain_config.clone(), rt).unwrap();
+        let chain = ibc_relayer::util::chain::bootstrap_chain(chain_config.clone(), rt).unwrap();
 
         let counterparty_chain = match chain.query_client_state(&self.client_id, Height::zero()) {
             Ok(cs) => cs.chain_id(),
@@ -248,7 +245,7 @@ impl Runnable for QueryClientConnectionsCmd {
         debug!("Options: {:?}", self);
 
         let rt = Arc::new(TokioRuntime::new().unwrap());
-        let chain = CosmosSdkChain::bootstrap(chain_config.clone(), rt).unwrap();
+        let chain = ibc_relayer::util::chain::bootstrap_chain(chain_config.clone (), rt).unwrap();
 
         let req = QueryClientConnectionsRequest {
             client_id: self.client_id.to_string(),

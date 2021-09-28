@@ -53,7 +53,7 @@ impl KeyRestoreCmd {
         let key_name = self
             .name
             .clone()
-            .unwrap_or_else(|| chain_config.key_name.clone());
+            .unwrap_or_else(|| chain_config.key_name().to_string());
 
         Ok(KeysRestoreOptions {
             mnemonic: self.mnemonic.clone(),
@@ -78,7 +78,7 @@ impl Runnable for KeyRestoreCmd {
         match key {
             Ok(key) => Output::success_msg(format!(
                 "Restored key '{}' ({}) on chain {}",
-                opts.key_name, key.account, opts.config.id
+                opts.key_name, key.account, opts.config.id()
             ))
             .exit(),
             Err(e) => Output::error(format!("{}", e)).exit(),
@@ -92,8 +92,8 @@ pub fn restore_key(
     hdpath: &HDPath,
     config: &ChainConfig,
 ) -> Result<KeyEntry, Box<dyn std::error::Error>> {
-    let mut keyring = KeyRing::new(Store::Test, &config.account_prefix, &config.id)?;
-    let key_entry = keyring.key_from_mnemonic(mnemonic, hdpath, &config.address_type)?;
+    let mut keyring = KeyRing::new(Store::Test, config.account_prefix(), config.id())?;
+    let key_entry = keyring.key_from_mnemonic(mnemonic, hdpath, config.address_type())?;
 
     keyring.add_key(key_name, key_entry.clone())?;
     Ok(key_entry)

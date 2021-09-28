@@ -67,8 +67,16 @@ tendermint = {git = "https://github.com/ChorusOne/tendermint-rs", branch = "giul
 tendermint-rpc = {git = "https://github.com/ChorusOne/tendermint-rs", branch = "giulio/prost_0_8", features = ["http-client", "websocket-client"]}
 tendermint-light-client = {git = "https://github.com/ChorusOne/tendermint-rs", branch = "giulio/prost_0_8", features = ["rpc-client", "secp256k1", "unstable"], default-features = false}
 tendermint-proto = {git = "https://github.com/ChorusOne/tendermint-rs", branch = "giulio/prost_0_8"}
-celo_light_client = {git = "https://github.com/ChorusOne/celo-light-client", branch="giulio/buildfix"}
+
+#web3 = {path = "/home/giulio/src/github.com/ChorusOne/rust-web3", features = ["celo"]}
+web3 = {git = "https://github.com/ChorusOne/rust-web3", branch = "celo", features = ["celo"]}
+#celo-types = {git = "https://github.com/ChorusOne/celo-light-client", branch="giulio/improvs"}
+celo-types = {path = "/home/giulio/src/github.com/ChorusOne/celo-light-client/types", features = ["web3_support", "serialize"]}
 rlp = {version = "0.5"}
+ethabi = {version = "14"}
+ethabi-derive = {version = "14"}
+ethabi-contract = {version = "11"}
+url = {version = "2", features = ["serde"]}
 chrono = {version = "0.4"}
 
 

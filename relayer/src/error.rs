@@ -32,6 +32,43 @@ use crate::event::monitor;
 
 define_error! {
     Error {
+        Web3
+            { address: String }
+            [ TraceError<web3::error::Error> ]
+            |e| { format!("Light client error for RPC address {0}", e.address) },
+
+        Web3Contract
+            { contract_call: String }
+            [ TraceError<web3::contract::Error> ]
+            |e| { format!("contract call error {0}", e.contract_call) },
+
+        CeloTypes
+            [ TraceError<celo_types::Error> ]
+            |_| { format!("celo-types error") },
+
+        CeloCustom
+            {message: String}
+            |e| { format!("Error: {}", e.message) },
+
+        Rlp
+            [TraceError<rlp::DecoderError>]
+            |_| { "Rlp Decoder" },
+
+        EthAbi
+            [TraceError<ethabi::Error>]
+            |_| { "EthAbi" },
+
+        HexDecode
+            [TraceError<hex::FromHexError>]
+            |_| { "Hex decode" },
+
+        SerdeJson
+            [TraceError<serde_json::Error>]
+            |_| { "serde json" },
+
+
+
+
         ConfigIo
             [ TraceError<std::io::Error> ]
             |_| { "config I/O error" },

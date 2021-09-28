@@ -40,7 +40,7 @@ use crate::error::Error;
 use crate::event::monitor::TxMonitorCmd;
 use crate::keyring::{KeyEntry, KeyRing};
 use crate::light_client::LightClient;
-use crate::{config::ChainConfig, event::monitor::EventReceiver};
+use crate::event::monitor::EventReceiver;
 
 pub(crate) mod cosmos;
 pub(crate) mod celo;
@@ -75,8 +75,100 @@ pub struct QueryPacketOptions {
     pub height: u64,
 }
 
+pub trait MinimalChainEndpoint {
+    /// Returns the chain's identifier
+    fn id(&self) -> &ChainId;
+
+    /// Perform a health check
+    fn health_check(&self) -> Result<HealthCheck, Error>;
+
+    /// Returns the chain's keybase
+    fn keybase(&self) -> &KeyRing;
+
+    /// Returns the chain's keybase, mutably
+    fn keybase_mut(&mut self) -> &mut KeyRing;
+
+    fn get_signer(&mut self) -> Result<Signer, Error>;
+
+    fn get_key(&mut self) -> Result<KeyEntry, Error>;
+
+   /// Sends one or more transactions with `msgs` to chain and
+    // synchronously wait for it to be committed.
+    fn send_messages_and_wait_commit(
+        &mut self,
+        proto_msgs: Vec<Any>,
+        ) -> Result<Vec<IbcEvent>, Error>;
+
+     /// Query the latest height the chain is at
+    fn query_latest_height(&self) -> Result<ICSHeight, Error>;
+
+    fn query_client_state(
+        &self,
+        client_id: &ClientId,
+        height: ICSHeight,
+        ) -> Result<AnyClientState, Error>;
+
+    /// Performs a query to retrieve the state of all clients that a chain hosts.
+    fn query_clients(
+        &self,
+        request: QueryClientStatesRequest,
+        ) -> Result<Vec<IdentifiedAnyClientState>, Error>;
+
+   fn query_txs(&self, request: QueryTxRequest) -> Result<Vec<IbcEvent>, Error>;
+
+   /// Performs a query to retrieve the identifiers of all connections.
+    fn query_connections(
+        &self,
+        request: QueryConnectionsRequest,
+        ) -> Result<Vec<IdentifiedConnectionEnd>, Error>;
+
+    /// Performs a query to retrieve the identifiers of all connections.
+    fn query_client_connections(
+        &self,
+        request: QueryClientConnectionsRequest,
+        ) -> Result<Vec<ConnectionId>, Error>;
+
+    fn query_connection(
+        &self,
+        connection_id: &ConnectionId,
+        height: ICSHeight,
+        ) -> Result<ConnectionEnd, Error>;
+
+    /// Performs a query to retrieve the identifiers of all channels associated with a connection.
+    fn query_connection_channels(
+        &self,
+        request: QueryConnectionChannelsRequest,
+        ) -> Result<Vec<IdentifiedChannelEnd>, Error>;
+
+    fn query_consensus_states(
+        &self,
+        request: QueryConsensusStatesRequest,
+        ) -> Result<Vec<AnyConsensusStateWithHeight>, Error>;
+
+    /// Performs a query to retrieve the consensus state (for a specific height `consensus_height`)
+    /// that an on-chain client stores.
+    fn query_consensus_state(
+        &self,
+        client_id: ClientId,
+        consensus_height: ICSHeight,
+        query_height: ICSHeight,
+        ) -> Result<AnyConsensusState, Error>;
+
+    fn query_channel(
+        &self,
+        port_id: &PortId,
+        channel_id: &ChannelId,
+        height: ICSHeight,
+        ) -> Result<ChannelEnd, Error>;
+
+
+}
+
 /// Defines a blockchain as understood by the relayer
-pub trait ChainEndpoint: Sized {
+pub trait ChainEndpoint: Sized + MinimalChainEndpoint {
+    /// Type of chain configuration accepted
+    type ChainConfig;
+
     /// Type of light blocks for this chain
     type LightBlock: Send + Sync;
 
@@ -93,7 +185,7 @@ pub trait ChainEndpoint: Sized {
     type LightClient: LightClient<Self>;
 
     /// Constructs the chain
-    fn bootstrap(config: ChainConfig, rt: Arc<TokioRuntime>) -> Result<Self, Error>;
+    fn bootstrap(config: Self::ChainConfig, rt: Arc<TokioRuntime>) -> Result<Self, Error>;
 
     #[allow(clippy::type_complexity)]
     /// Initializes and returns the light client (if any) associated with this chain.
@@ -103,40 +195,18 @@ pub trait ChainEndpoint: Sized {
     fn init_event_monitor(
         &self,
         rt: Arc<TokioRuntime>,
-    ) -> Result<(EventReceiver, TxMonitorCmd), Error>;
+        ) -> Result<(EventReceiver, TxMonitorCmd), Error>;
 
-    /// Returns the chain's identifier
-    fn id(&self) -> &ChainId;
 
     /// Shutdown the chain runtime
     fn shutdown(self) -> Result<(), Error>;
-
-    /// Perform a health check
-    fn health_check(&self) -> Result<HealthCheck, Error>;
-
-    /// Returns the chain's keybase
-    fn keybase(&self) -> &KeyRing;
-
-    /// Returns the chain's keybase, mutably
-    fn keybase_mut(&mut self) -> &mut KeyRing;
-
-    /// Sends one or more transactions with `msgs` to chain and
-    // synchronously wait for it to be committed.
-    fn send_messages_and_wait_commit(
-        &mut self,
-        proto_msgs: Vec<Any>,
-    ) -> Result<Vec<IbcEvent>, Error>;
 
     /// Sends one or more transactions with `msgs` to chain.
     /// Non-blocking alternative to `send_messages_and_wait_commit` interface.
     fn send_messages_and_wait_check_tx(
         &mut self,
         proto_msgs: Vec<Any>,
-    ) -> Result<Vec<TxResponse>, Error>;
-
-    fn get_signer(&mut self) -> Result<Signer, Error>;
-
-    fn get_key(&mut self) -> Result<KeyEntry, Error>;
+        ) -> Result<Vec<TxResponse>, Error>;
 
     // Queries
 
@@ -147,81 +217,21 @@ pub trait ChainEndpoint: Sized {
         Ok(get_compatible_versions())
     }
 
-    /// Query the latest height the chain is at
-    fn query_latest_height(&self) -> Result<ICSHeight, Error>;
-
-    /// Performs a query to retrieve the state of all clients that a chain hosts.
-    fn query_clients(
-        &self,
-        request: QueryClientStatesRequest,
-    ) -> Result<Vec<IdentifiedAnyClientState>, Error>;
-
-    fn query_client_state(
-        &self,
-        client_id: &ClientId,
-        height: ICSHeight,
-    ) -> Result<AnyClientState, Error>;
-
-    fn query_consensus_states(
-        &self,
-        request: QueryConsensusStatesRequest,
-    ) -> Result<Vec<AnyConsensusStateWithHeight>, Error>;
-
-    /// Performs a query to retrieve the consensus state (for a specific height `consensus_height`)
-    /// that an on-chain client stores.
-    fn query_consensus_state(
-        &self,
-        client_id: ClientId,
-        consensus_height: ICSHeight,
-        query_height: ICSHeight,
-    ) -> Result<AnyConsensusState, Error>;
-
     fn query_upgraded_client_state(
         &self,
         height: ICSHeight,
-    ) -> Result<(Self::ClientState, MerkleProof), Error>;
+        ) -> Result<(Self::ClientState, MerkleProof), Error>;
 
     fn query_upgraded_consensus_state(
         &self,
         height: ICSHeight,
-    ) -> Result<(Self::ConsensusState, MerkleProof), Error>;
+        ) -> Result<(Self::ConsensusState, MerkleProof), Error>;
 
-    /// Performs a query to retrieve the identifiers of all connections.
-    fn query_connections(
-        &self,
-        request: QueryConnectionsRequest,
-    ) -> Result<Vec<IdentifiedConnectionEnd>, Error>;
-
-    /// Performs a query to retrieve the identifiers of all connections.
-    fn query_client_connections(
-        &self,
-        request: QueryClientConnectionsRequest,
-    ) -> Result<Vec<ConnectionId>, Error>;
-
-    fn query_connection(
-        &self,
-        connection_id: &ConnectionId,
-        height: ICSHeight,
-    ) -> Result<ConnectionEnd, Error>;
-
-    /// Performs a query to retrieve the identifiers of all channels associated with a connection.
-    fn query_connection_channels(
-        &self,
-        request: QueryConnectionChannelsRequest,
-    ) -> Result<Vec<IdentifiedChannelEnd>, Error>;
-
-    /// Performs a query to retrieve the identifiers of all channels.
+     /// Performs a query to retrieve the identifiers of all channels.
     fn query_channels(
         &self,
         request: QueryChannelsRequest,
-    ) -> Result<Vec<IdentifiedChannelEnd>, Error>;
-
-    fn query_channel(
-        &self,
-        port_id: &PortId,
-        channel_id: &ChannelId,
-        height: ICSHeight,
-    ) -> Result<ChannelEnd, Error>;
+        ) -> Result<Vec<IdentifiedChannelEnd>, Error>;
 
     // TODO: Introduce a newtype for the module version string
     fn query_module_version(&self, port_id: &PortId) -> String {
@@ -238,61 +248,59 @@ pub trait ChainEndpoint: Sized {
     fn query_channel_client_state(
         &self,
         request: QueryChannelClientStateRequest,
-    ) -> Result<Option<IdentifiedAnyClientState>, Error>;
+        ) -> Result<Option<IdentifiedAnyClientState>, Error>;
 
     fn query_packet_commitments(
         &self,
         request: QueryPacketCommitmentsRequest,
-    ) -> Result<(Vec<PacketState>, ICSHeight), Error>;
+        ) -> Result<(Vec<PacketState>, ICSHeight), Error>;
 
     fn query_unreceived_packets(
         &self,
         request: QueryUnreceivedPacketsRequest,
-    ) -> Result<Vec<u64>, Error>;
+        ) -> Result<Vec<u64>, Error>;
 
     fn query_packet_acknowledgements(
         &self,
         request: QueryPacketAcknowledgementsRequest,
-    ) -> Result<(Vec<PacketState>, ICSHeight), Error>;
+        ) -> Result<(Vec<PacketState>, ICSHeight), Error>;
 
     fn query_unreceived_acknowledgements(
         &self,
         request: QueryUnreceivedAcksRequest,
-    ) -> Result<Vec<u64>, Error>;
+        ) -> Result<Vec<u64>, Error>;
 
     fn query_next_sequence_receive(
         &self,
         request: QueryNextSequenceReceiveRequest,
-    ) -> Result<Sequence, Error>;
+        ) -> Result<Sequence, Error>;
 
-    fn query_txs(&self, request: QueryTxRequest) -> Result<Vec<IbcEvent>, Error>;
-
-    // Provable queries
+     // Provable queries
     fn proven_client_state(
         &self,
         client_id: &ClientId,
         height: ICSHeight,
-    ) -> Result<(Self::ClientState, MerkleProof), Error>;
+        ) -> Result<(Self::ClientState, MerkleProof), Error>;
 
     fn proven_connection(
         &self,
         connection_id: &ConnectionId,
         height: ICSHeight,
-    ) -> Result<(ConnectionEnd, MerkleProof), Error>;
+        ) -> Result<(ConnectionEnd, MerkleProof), Error>;
 
     fn proven_client_consensus(
         &self,
         client_id: &ClientId,
         consensus_height: ICSHeight,
         height: ICSHeight,
-    ) -> Result<(Self::ConsensusState, MerkleProof), Error>;
+        ) -> Result<(Self::ConsensusState, MerkleProof), Error>;
 
     fn proven_channel(
         &self,
         port_id: &PortId,
         channel_id: &ChannelId,
         height: ICSHeight,
-    ) -> Result<(ChannelEnd, MerkleProof), Error>;
+        ) -> Result<(ChannelEnd, MerkleProof), Error>;
 
     fn proven_packet(
         &self,
@@ -301,14 +309,14 @@ pub trait ChainEndpoint: Sized {
         channel_id: ChannelId,
         sequence: Sequence,
         height: ICSHeight,
-    ) -> Result<(Vec<u8>, MerkleProof), Error>;
+        ) -> Result<(Vec<u8>, MerkleProof), Error>;
 
     fn build_client_state(&self, height: ICSHeight) -> Result<Self::ClientState, Error>;
 
     fn build_consensus_state(
         &self,
         light_block: Self::LightBlock,
-    ) -> Result<Self::ConsensusState, Error>;
+        ) -> Result<Self::ConsensusState, Error>;
 
     /// Fetch, and verify the header at `target_height`, assuming we trust the
     /// header at `trusted_height` with the given `client_state`.
@@ -321,7 +329,7 @@ pub trait ChainEndpoint: Sized {
         target_height: ICSHeight,
         client_state: &AnyClientState,
         light_client: &mut Self::LightClient,
-    ) -> Result<(Self::Header, Vec<Self::Header>), Error>;
+        ) -> Result<(Self::Header, Vec<Self::Header>), Error>;
 
     /// Builds the required proofs and the client state for connection handshake messages.
     /// The proofs and client state must be obtained from queries at same height.
@@ -331,7 +339,7 @@ pub trait ChainEndpoint: Sized {
         connection_id: &ConnectionId,
         client_id: &ClientId,
         height: ICSHeight,
-    ) -> Result<(Option<Self::ClientState>, Proofs), Error> {
+        ) -> Result<(Option<Self::ClientState>, Proofs), Error> {
         let (connection_end, connection_proof) = self.proven_connection(connection_id, height)?;
 
         // Check that the connection state is compatible with the message
@@ -339,16 +347,16 @@ pub trait ChainEndpoint: Sized {
             ConnectionMsgType::OpenTry => {
                 if !connection_end.state_matches(&State::Init)
                     && !connection_end.state_matches(&State::TryOpen)
-                {
-                    return Err(Error::bad_connection_state());
-                }
+                    {
+                        return Err(Error::bad_connection_state());
+                    }
             }
             ConnectionMsgType::OpenAck => {
                 if !connection_end.state_matches(&State::TryOpen)
                     && !connection_end.state_matches(&State::Open)
-                {
-                    return Err(Error::bad_connection_state());
-                }
+                    {
+                        return Err(Error::bad_connection_state());
+                    }
             }
             ConnectionMsgType::OpenConfirm => {
                 if !connection_end.state_matches(&State::Open) {
@@ -376,9 +384,9 @@ pub trait ChainEndpoint: Sized {
                     ConsensusProof::new(
                         CommitmentProofBytes::from(consensus_state_proof),
                         client_state_value.latest_height(),
-                    )
+                        )
                     .map_err(Error::consensus_proof)?,
-                );
+                    );
 
                 client_state = Some(client_state_value);
             }
@@ -386,16 +394,16 @@ pub trait ChainEndpoint: Sized {
         }
 
         Ok((
-            client_state,
-            Proofs::new(
-                CommitmentProofBytes::from(connection_proof),
-                client_proof,
-                consensus_proof,
-                None,
-                height.increment(),
-            )
-            .map_err(Error::malformed_proof)?,
-        ))
+                client_state,
+                Proofs::new(
+                    CommitmentProofBytes::from(connection_proof),
+                    client_proof,
+                    consensus_proof,
+                    None,
+                    height.increment(),
+                    )
+                .map_err(Error::malformed_proof)?,
+                ))
     }
 
     /// Builds the proof for channel handshake messages.
@@ -404,7 +412,7 @@ pub trait ChainEndpoint: Sized {
         port_id: &PortId,
         channel_id: &ChannelId,
         height: ICSHeight,
-    ) -> Result<Proofs, Error> {
+        ) -> Result<Proofs, Error> {
         // Collect all proofs as required
         let channel_proof =
             CommitmentProofBytes::from(self.proven_channel(port_id, channel_id, height)?.1);
@@ -421,11 +429,11 @@ pub trait ChainEndpoint: Sized {
         channel_id: ChannelId,
         sequence: Sequence,
         height: ICSHeight,
-    ) -> Result<(Vec<u8>, Proofs), Error> {
+        ) -> Result<(Vec<u8>, Proofs), Error> {
         let channel_proof = if packet_type == PacketMsgType::TimeoutOnClose {
             Some(CommitmentProofBytes::from(
-                self.proven_channel(&port_id, &channel_id, height)?.1,
-            ))
+                    self.proven_channel(&port_id, &channel_id, height)?.1,
+                    ))
         } else {
             None
         };
@@ -439,8 +447,8 @@ pub trait ChainEndpoint: Sized {
             None,
             channel_proof,
             height.increment(),
-        )
-        .map_err(Error::malformed_proof)?;
+            )
+            .map_err(Error::malformed_proof)?;
 
         Ok((bytes, proofs))
     }

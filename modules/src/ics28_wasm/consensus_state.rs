@@ -2,7 +2,7 @@ use crate::ics02_client::client_consensus;
 use crate::ics02_client::client_type::ClientType;
 use crate::ics23_commitment::commitment::CommitmentRoot;
 use crate::ics28_wasm::error::Error;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use ibc_proto::ibc::core::commitment::v1::MerkleRoot;
 use ibc_proto::ibc::lightclients::wasm::v1::ConsensusState as RawConsensusState;
 use serde::Serialize;
@@ -14,7 +14,7 @@ use tendermint_proto::Protobuf;
 pub struct ConsensusState {
     pub data: Vec<u8>,
     pub code_id: Vec<u8>,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: NaiveDateTime,
     pub root: CommitmentRoot,
 }
 
@@ -40,8 +40,7 @@ impl Protobuf<RawConsensusState> for ConsensusState {}
 impl TryFrom<RawConsensusState> for ConsensusState {
     type Error = Error;
     fn try_from(raw: RawConsensusState) -> Result<Self, Self::Error> {
-        let timestamp =
-            DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(raw.timestamp as i64, 0), Utc);
+        let timestamp = NaiveDateTime::from_timestamp(raw.timestamp as i64, 0);
         let root: CommitmentRoot = raw
             .root
             .ok_or_else(|| Error::missing_raw_consensus_state(String::from("missing root")))?

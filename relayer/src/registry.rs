@@ -10,10 +10,9 @@ use tracing::{trace, warn};
 
 use ibc::ics24_host::identifier::ChainId;
 
+use crate::util;
 use crate::{
-    chain::{handle::ChainHandle, runtime::ChainRuntime, CeloChain, CosmosSdkChain},
-    config::Config,
-    error::Error as RelayerError,
+    chain::handle::ChainHandle, config::Config, error::Error as RelayerError,
     supervisor::RwArc,
 };
 
@@ -23,15 +22,15 @@ define_error! {
             [ RelayerError ]
             | _ | { "relayer error" },
 
-        RuntimeNotFound
-            | _ | { "expected runtime to be found in registry" },
+            RuntimeNotFound
+                | _ | { "expected runtime to be found in registry" },
 
-        MissingChain
-            { chain_id: ChainId }
-            | e | {
-                format_args!("missing chain for id ({}) in configuration file",
-                    e.chain_id)
-            }
+                MissingChain
+                { chain_id: ChainId }
+        | e | {
+            format_args!("missing chain for id ({}) in configuration file",
+            e.chain_id)
+        }
     }
 }
 
@@ -64,6 +63,7 @@ impl<Chain: ChainHandle> Registry<Chain> {
     }
 
     /// Return the size of the registry, i.e., the number of distinct chain runtimes.
+    /// use crate::utils::chain;
     pub fn size(&self) -> usize {
         self.handles.len()
     }
@@ -127,17 +127,5 @@ pub fn spawn_chain_runtime<Chain: ChainHandle>(
         .cloned()
         .ok_or_else(|| SpawnError::missing_chain(chain_id.clone()))?;
 
-    if chain_config.account_prefix == "cosmos" {
-        println!("init of cosmos sdk");
-        let handle =
-            ChainRuntime::<CosmosSdkChain>::spawn(chain_config, rt).map_err(SpawnError::relayer)?;
-        return Ok(handle);
-    } else if chain_config.account_prefix == "celo" {
-        println!("init of celo");
-        let handle =
-            ChainRuntime::<CeloChain>::spawn(chain_config, rt).map_err(SpawnError::relayer)?;
-        return Ok(handle);
-    } else {
-        panic!("chain prefix not recognized")
-    }
+    util::chain::chainrutime_spawn::<Chain>(chain_config, rt).map_err(SpawnError::relayer)
 }

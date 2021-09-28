@@ -62,7 +62,7 @@ impl AnyConsensusState {
                 Timestamp::from_datetime(date)
             }
             Self::Wasm(cs_state) => {
-                let date: DateTime<Utc> = cs_state.timestamp.into();
+                let date = DateTime::<Utc>::from_utc(cs_state.timestamp, Utc);
                 Timestamp::from_datetime(date)
             }
 

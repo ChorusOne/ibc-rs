@@ -16,7 +16,7 @@ use ibc_proto::cosmos::gov::v1beta1::MsgSubmitProposal;
 use ibc_proto::cosmos::upgrade::v1beta1::{Plan, SoftwareUpgradeProposal};
 use ibc_proto::ibc::core::client::v1::UpgradeProposal;
 
-use crate::chain::{ChainEndpoint, CosmosSdkChain};
+use crate::chain::MinimalChainEndpoint;
 use crate::config::ChainConfig;
 use crate::error::Error;
 
@@ -62,8 +62,8 @@ pub struct UpgradePlanOptions {
 }
 
 pub fn build_and_send_ibc_upgrade_proposal(
-    mut dst_chain: CosmosSdkChain, // the chain which will undergo an upgrade
-    src_chain: CosmosSdkChain, // the source chain; supplies a client state for building the upgrade plan
+    mut dst_chain: Box<dyn MinimalChainEndpoint>, // the chain which will undergo an upgrade
+    src_chain: Box<dyn MinimalChainEndpoint>, // the source chain; supplies a client state for building the upgrade plan
     opts: &UpgradePlanOptions,
 ) -> Result<Vec<IbcEvent>, UpgradeChainError> {
     let upgrade_height = dst_chain
@@ -75,7 +75,7 @@ pub fn build_and_send_ibc_upgrade_proposal(
         .query_client_state(&opts.src_client_id, Height::zero())
         .map_err(UpgradeChainError::query)?;
     let client_state = downcast!(any_client_state => AnyClientState::Tendermint)
-        .ok_or_else(||Error::client_state_type(String::from("type unknown")))
+        .ok_or_else(|| Error::client_state_type(String::from("type unknown")))
         .map_err(UpgradeChainError::query)?;
 
     // Retain the old unbonding period in case the user did not specify a new one

@@ -362,7 +362,7 @@ impl<Chain: ChainHandle + 'static> Supervisor<Chain> {
         let chains = &self.config.read().expect("poisoned lock").chains;
 
         for config in chains {
-            let id = &config.id;
+            let id = &config.id();
             let chain = self.registry.get_or_spawn(id);
 
             match chain {
@@ -374,7 +374,7 @@ impl<Chain: ChainHandle + 'static> Supervisor<Chain> {
                 Err(e) => {
                     error!(
                         "skipping health check for chain {}, reason: failed to spawn chain runtime with error: {}",
-                        config.id, e
+                        config.id(), e
                     );
                 }
             }
@@ -426,12 +426,12 @@ impl<Chain: ChainHandle + 'static> Supervisor<Chain> {
         let mut subscriptions = Vec::with_capacity(chains.len());
 
         for chain_config in chains {
-            let chain = match self.registry.get_or_spawn(&chain_config.id) {
+            let chain = match self.registry.get_or_spawn(&chain_config.id()) {
                 Ok(chain) => chain,
                 Err(e) => {
                     error!(
                         "failed to spawn chain runtime for {}: {}",
-                        chain_config.id, e
+                        chain_config.id(), e
                     );
 
                     continue;
@@ -442,7 +442,7 @@ impl<Chain: ChainHandle + 'static> Supervisor<Chain> {
                 Ok(subscription) => subscriptions.push((chain, subscription)),
                 Err(e) => error!(
                     "failed to subscribe to events of {}: {}",
-                    chain_config.id, e
+                    chain_config.id(), e
                 ),
             }
         }
@@ -501,7 +501,7 @@ impl<Chain: ChainHandle + 'static> Supervisor<Chain> {
     /// If the addition had any effect, returns [`CmdEffect::ConfigChanged`] as
     /// subscriptions need to be reset to take into account the newly added chain.
     fn add_chain(&mut self, config: ChainConfig) -> CmdEffect {
-        let id = config.id.clone();
+        let id = config.id().clone();
 
         if self.config.read().expect("poisoned lock").has_chain(&id) {
             info!(chain.id=%id, "skipping addition of already existing chain");
@@ -529,7 +529,7 @@ impl<Chain: ChainHandle + 'static> Supervisor<Chain> {
                 .write()
                 .expect("poisoned lock")
                 .chains
-                .retain(|c| c.id != id);
+                .retain(|c| *c.id() != id);
 
             return CmdEffect::Nothing;
         }
@@ -558,7 +558,7 @@ impl<Chain: ChainHandle + 'static> Supervisor<Chain> {
             .write()
             .expect("poisoned lock")
             .chains
-            .retain(|c| &c.id != id);
+            .retain(|c| *c.id() != *id);
 
         debug!(chain.id=%id, "shutting down workers");
         let mut ctx = self.spawn_context(SpawnMode::Reload);
@@ -577,9 +577,9 @@ impl<Chain: ChainHandle + 'static> Supervisor<Chain> {
     /// If the update had any effect, returns [`CmdEffect::ConfigChanged`] as
     /// subscriptions need to be reset to take into account the newly added chain.
     fn update_chain(&mut self, config: ChainConfig) -> CmdEffect {
-        info!(chain.id=%config.id, "updating existing chain");
+        info!(chain.id=%config.id(), "updating existing chain");
 
-        let removed = self.remove_chain(&config.id);
+        let removed = self.remove_chain(&config.id());
         let added = self.add_chain(config);
         removed.or(added)
     }

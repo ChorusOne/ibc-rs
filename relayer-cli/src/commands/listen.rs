@@ -101,7 +101,7 @@ pub fn listen(
     info!(
         "listening for events `{}` on '{}'...",
         filters.iter().format(", "),
-        config.id
+        config.id()
     );
 
     let rt = Arc::new(TokioRuntime::new()?);
@@ -146,8 +146,8 @@ fn subscribe(
     rt: Arc<TokioRuntime>,
 ) -> Result<(EventMonitor, EventReceiver), Box<dyn std::error::Error>> {
     let (mut event_monitor, rx, _) = EventMonitor::new(
-        chain_config.id.clone(),
-        chain_config.websocket_addr.clone(),
+        chain_config.id().clone(),
+        chain_config.websocket_addr(),
         rt,
     )
     .map_err(|e| format!("could not initialize event monitor: {}", e))?;

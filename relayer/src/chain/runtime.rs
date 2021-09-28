@@ -42,7 +42,6 @@ use ibc_proto::ibc::core::{
 };
 
 use crate::{
-    config::ChainConfig,
     connection::ConnectionMsgType,
     error::Error,
     event::{
@@ -55,7 +54,7 @@ use crate::{
 
 use super::{
     handle::{ChainHandle, ChainRequest, ReplyTo, Subscription},
-    ChainEndpoint, HealthCheck,
+    ChainEndpoint, MinimalChainEndpoint, HealthCheck,
 };
 
 pub struct Threads {
@@ -97,7 +96,7 @@ where
 {
     /// Spawns a new runtime for a specific Chain implementation.
     pub fn spawn<Handle: ChainHandle>(
-        config: ChainConfig,
+        config: Endpoint::ChainConfig,
         rt: Arc<TokioRuntime>,
     ) -> Result<Handle, Error> {
         // Similar to `from_config`.
@@ -162,7 +161,7 @@ where
     }
 
     pub fn handle<Handle: ChainHandle>(&self) -> Handle {
-        let chain_id = ChainEndpoint::id(&self.chain).clone();
+        let chain_id = MinimalChainEndpoint::id(&self.chain).clone();
         let sender = self.request_sender.clone();
 
         Handle::new(chain_id, sender)

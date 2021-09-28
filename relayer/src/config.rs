@@ -8,6 +8,7 @@ use alloc::collections::BTreeSet as HashSet;
 use core::{fmt, time::Duration};
 use std::{fs, fs::File, io::Write, path::Path};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use serde_derive::{Deserialize, Serialize};
 use tendermint_light_client::types::TrustThreshold;
@@ -126,15 +127,15 @@ pub struct Config {
 
 impl Config {
     pub fn has_chain(&self, id: &ChainId) -> bool {
-        self.chains.iter().any(|c| c.id == *id)
+        self.chains.iter().any(|c| *c.id() == *id)
     }
 
     pub fn find_chain(&self, id: &ChainId) -> Option<&ChainConfig> {
-        self.chains.iter().find(|c| c.id == *id)
+        self.chains.iter().find(|c| *c.id() == *id)
     }
 
     pub fn find_chain_mut(&mut self, id: &ChainId) -> Option<&mut ChainConfig> {
-        self.chains.iter_mut().find(|c| c.id == *id)
+        self.chains.iter_mut().find(|c| *c.id() == *id)
     }
 
     /// Returns true if filtering is disabled or if packets are allowed on
@@ -152,7 +153,7 @@ impl Config {
 
         match self.find_chain(chain_id) {
             None => false,
-            Some(chain_config) => chain_config.packet_filter.is_allowed(port_id, channel_id),
+            Some(chain_config) => chain_config.packet_filter().is_allowed(port_id, channel_id),
         }
     }
 
@@ -161,7 +162,7 @@ impl Config {
     }
 
     pub fn chains_map(&self) -> HashMap<&ChainId, &ChainConfig> {
-        self.chains.iter().map(|c| (&c.id, c)).collect()
+        self.chains.iter().map(|c| (c.id(), c)).collect()
     }
 }
 
@@ -304,14 +305,21 @@ impl fmt::Display for AddressType {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "chain_type")]
+pub enum ChainConfig{
+    #[serde(rename = "tendermint")]
+    Tendermint(TMChainConfig),
+    #[serde(rename = "celo")]
+    Celo(CeloChainConfig)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ChainConfig {
+pub struct TMChainConfig {
     pub id: ChainId,
     pub rpc_addr: tendermint_rpc::Url,
     pub websocket_addr: tendermint_rpc::Url,
     pub grpc_addr: tendermint_rpc::Url,
-    pub simul_file: PathBuf,
-    pub code_id: String,
     #[serde(default = "default::rpc_timeout", with = "humantime_serde")]
     pub rpc_timeout: Duration,
     pub account_prefix: String,
@@ -325,7 +333,7 @@ pub struct ChainConfig {
     pub max_tx_size: MaxTxSize,
     #[serde(default = "default::clock_drift", with = "humantime_serde")]
     pub clock_drift: Duration,
-    #[serde(default = "default::trusting_period", with = "humantime_serde")]
+    #[serde(with = "humantime_serde")]
     pub trusting_period: Duration,
 
     // these two need to be last otherwise we run into `ValueAfterTable` error when serializing to TOML
@@ -336,6 +344,86 @@ pub struct ChainConfig {
     pub packet_filter: PacketFilter,
     #[serde(default)]
     pub address_type: AddressType,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CeloChainConfig {
+    pub id: ChainId,
+    pub rpc_addr: url::Url,
+    pub websocket_addr: url::Url,
+    #[serde(default = "default::rpc_timeout", with = "humantime_serde")]
+    pub rpc_timeout: Duration,
+    pub code_id: String,
+    pub client_contract_address : web3::types::Address,
+    pub client_contract_abi_json: PathBuf,
+    pub handler_contract_address : web3::types::Address,
+    pub handler_contract_abi_json: PathBuf,
+    pub host_contract_address : web3::types::Address,
+    pub host_contract_abi_json: PathBuf,
+    pub account_prefix: String,
+    pub key_name: String,
+    pub store_prefix: String,
+    pub max_gas: Option<u64>,
+    #[serde(default)]
+    pub max_tx_size: MaxTxSize,
+    pub gas_price: u64,
+    #[serde(default)]
+    pub packet_filter: PacketFilter,
+    #[serde(default)]
+    pub address_type: AddressType,
+    //Celo light client state
+    pub epoch_size: u64,
+    pub allowed_clock_skew: u64,
+    pub trusting_period: u64,
+    pub upgrade_path: Vec<String>,
+    pub verify_epoch_headers: bool,
+    pub verify_non_epoch_headers: bool,
+    pub verify_header_timestamp: bool,
+    pub allow_update_after_misbehavior: bool,
+    pub allow_update_after_expiry: bool,
+}
+
+impl ChainConfig{
+    pub fn id(&self) -> &ChainId {
+        match self {
+            Self::Tendermint(config) => &config.id,
+            Self::Celo(config) => &config.id,
+        }
+    }
+    pub fn account_prefix(&self) -> &str {
+        match self {
+            Self::Tendermint(config) => &config.account_prefix,
+            Self::Celo(config) => &config.account_prefix,
+        }
+    }
+    pub fn packet_filter(&self) -> &PacketFilter {
+        match self {
+            Self::Tendermint(config) => &config.packet_filter,
+            Self::Celo(config) => &config.packet_filter,
+        }
+    }
+    pub fn key_name(&self) -> &str {
+        match self {
+            Self::Tendermint(config) => &config.key_name,
+            Self::Celo(config) => &config.key_name,
+        }
+    }
+    pub fn address_type(&self) -> &AddressType {
+        match self {
+            Self::Tendermint(config) => &config.address_type,
+            Self::Celo(config) => &config.address_type,
+        }
+    }
+    // WARNING: this is an hack, it should be a generic URL not tendermint
+    pub fn websocket_addr(&self) -> tendermint_rpc::Url {
+        match self {
+            Self::Tendermint(config) => config.websocket_addr.clone(),
+            Self::Celo(config) => {
+                tendermint_rpc::Url::from_str(config.websocket_addr.as_str()).unwrap()
+            },
+        }
+    } 
 }
 
 /// Attempt to load and parse the TOML config file as a `Config`.

@@ -10,3 +10,4 @@ pub mod iter;
 pub mod queue;
 pub mod retry;
 pub mod stream;
+pub mod chain;

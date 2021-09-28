@@ -46,7 +46,7 @@ impl KeysAddCmd {
         let name = self
             .name
             .clone()
-            .unwrap_or_else(|| chain_config.key_name.clone());
+            .unwrap_or_else(|| chain_config.key_name().to_string());
 
         let hd_path = HDPath::from_str(&self.hd_path)
             .map_err(|_| format!("invalid derivation path: {}", self.hd_path))?;
@@ -82,7 +82,7 @@ impl Runnable for KeysAddCmd {
         match key {
             Ok(key) => Output::success_msg(format!(
                 "Added key '{}' ({}) on chain {}",
-                opts.name, key.account, opts.config.id
+                opts.name, key.account, opts.config.id()
             ))
             .exit(),
             Err(e) => Output::error(format!("{}", e)).exit(),
@@ -96,7 +96,7 @@ pub fn add_key(
     file: &Path,
     hd_path: &HDPath,
 ) -> Result<KeyEntry, Box<dyn std::error::Error>> {
-    let mut keyring = KeyRing::new(Store::Test, &config.account_prefix, &config.id)?;
+    let mut keyring = KeyRing::new(Store::Test, config.account_prefix(), config.id())?;
 
     let key_contents = fs::read_to_string(file).map_err(|_| "error reading the key file")?;
     let key = keyring.key_from_seed_file(&key_contents, hd_path)?;

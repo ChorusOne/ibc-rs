@@ -8,8 +8,8 @@ use ibc::events::IbcEvent;
 use ibc::ics24_host::identifier::{ChainId, ClientId};
 use ibc_relayer::upgrade_chain::{build_and_send_ibc_upgrade_proposal, UpgradePlanOptions};
 use ibc_relayer::{
-    chain::{ChainEndpoint, CosmosSdkChain},
     config::Config,
+    util,
 };
 
 use crate::conclude::Output;
@@ -113,15 +113,14 @@ impl Runnable for TxIbcUpgradeChainCmd {
 
         let rt = Arc::new(TokioRuntime::new().unwrap());
 
-        let src_chain_res = CosmosSdkChain::bootstrap(opts.src_chain_config.clone(), rt.clone())
+        let src_chain_res = util::chain::bootstrap_chain(opts.src_chain_config.clone(), rt.clone())
             .map_err(Error::relayer);
         let src_chain = match src_chain_res {
             Ok(chain) => chain,
             Err(e) => return Output::error(format!("{}", e)).exit(),
         };
 
-        let dst_chain_res =
-            CosmosSdkChain::bootstrap(opts.dst_chain_config.clone(), rt).map_err(Error::relayer);
+        let dst_chain_res = util::chain::bootstrap_chain(opts.dst_chain_config.clone(), rt).map_err(Error::relayer);
         let dst_chain = match dst_chain_res {
             Ok(chain) => chain,
             Err(e) => return Output::error(format!("{}", e)).exit(),

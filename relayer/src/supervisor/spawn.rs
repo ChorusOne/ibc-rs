@@ -74,7 +74,7 @@ impl<'a, Chain: ChainHandle + 'static> SpawnContext<'a, Chain> {
             .expect("poisoned lock")
             .chains
             .iter()
-            .map(|c| &c.id)
+            .map(|c| c.id())
             .cloned()
             .collect_vec();
 
@@ -166,12 +166,12 @@ impl<'a, Chain: ChainHandle + 'static> SpawnContext<'a, Chain> {
             .expect("poisoned lock")
             .chains
             .iter()
-            .map(|c| &c.id)
+            .map(|c| c.id())
             .cloned()
             .collect_vec();
 
         for id in chain_ids {
-            if chain_id == &id {
+            if *chain_id == id {
                 continue;
             }
             self.spawn_workers_from_chain_to_chain(&id, chain_id);

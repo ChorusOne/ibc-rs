@@ -9,7 +9,6 @@ use ibc::{
     ics24_host::identifier::{ChainId, PortChannelId},
 };
 use ibc_proto::ibc::core::channel::v1::QueryConnectionChannelsRequest;
-use ibc_relayer::chain::{ChainEndpoint, CosmosSdkChain};
 
 use crate::conclude::Output;
 use crate::error::Error;
@@ -46,7 +45,7 @@ impl Runnable for QueryConnectionEndCmd {
         debug!("Options: {:?}", self);
 
         let rt = Arc::new(TokioRuntime::new().unwrap());
-        let chain = CosmosSdkChain::bootstrap(chain_config.clone(), rt).unwrap();
+        let chain = ibc_relayer::util::chain::bootstrap_chain(chain_config.clone(), rt).unwrap();
 
         let height = ibc::Height::new(chain.id().version(), self.height.unwrap_or(0_u64));
         let res = chain.query_connection(&self.connection_id, height);
@@ -97,7 +96,7 @@ impl Runnable for QueryConnectionChannelsCmd {
         debug!("Options: {:?}", self);
 
         let rt = Arc::new(TokioRuntime::new().unwrap());
-        let chain = CosmosSdkChain::bootstrap(chain_config.clone(), rt).unwrap();
+        let chain = ibc_relayer::util::chain::bootstrap_chain(chain_config.clone(), rt).unwrap();
 
         let req = QueryConnectionChannelsRequest {
             connection: self.connection_id.to_string(),

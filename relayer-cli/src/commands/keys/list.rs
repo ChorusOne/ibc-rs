@@ -63,7 +63,7 @@ pub struct KeysListOptions {
 pub fn list_keys(
     config: ChainConfig,
 ) -> Result<Vec<(String, KeyEntry)>, Box<dyn std::error::Error>> {
-    let keyring = KeyRing::new(Store::Test, &config.account_prefix, &config.id)?;
+    let keyring = KeyRing::new(Store::Test, config.account_prefix(), config.id())?;
     let keys = keyring.keys()?;
     Ok(keys)
 }

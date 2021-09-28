@@ -9,10 +9,9 @@ use ibc_relayer::{
     chain::{
         handle::{ChainHandle, ProdChainHandle},
         runtime::ChainRuntime,
-        CosmosSdkChain,
-        CeloChain,
+        CeloChain, CosmosSdkChain,
     },
-    config::Config,
+    config::{ChainConfig, Config},
 };
 
 use crate::error::Error;
@@ -67,16 +66,13 @@ pub fn spawn_chain_runtime_generic<Chain: ChainHandle>(
         .ok_or_else(|| Error::missing_config(chain_id.clone()))?;
 
     let rt = Arc::new(TokioRuntime::new().unwrap());
-    if chain_config.account_prefix == "cosmos" {
-    let handle =
-        ChainRuntime::<CosmosSdkChain>::spawn::<Chain>(chain_config, rt).map_err(Error::relayer)?;
-    Ok(handle)
-    } else if chain_config.account_prefix == "celo" {
-    let handle =
-        ChainRuntime::<CeloChain>::spawn::<Chain>(chain_config, rt).map_err(Error::relayer)?;
-    Ok(handle)
-    } else {
-        panic!("account_prefix not recognized");
+    match chain_config {
+        ChainConfig::Tendermint(config) => {
+            ChainRuntime::<CosmosSdkChain>::spawn::<Chain>(config, rt).map_err(Error::relayer)
+        }
+        ChainConfig::Celo(config) => {
+            ChainRuntime::<CeloChain>::spawn::<Chain>(config, rt).map_err(Error::relayer)
+        }
     }
 }
 

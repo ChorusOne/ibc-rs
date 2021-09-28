@@ -14,6 +14,7 @@ use tendermint_light_client::types::TrustThreshold;
 use tracing_subscriber::filter::ParseError;
 
 use crate::application::app_reader;
+use ibc_relayer::config::ChainConfig;
 
 /// Get the path to configuration file
 pub fn config_path() -> Option<PathBuf> {
@@ -61,11 +62,16 @@ pub fn validate_config(config: &Config) -> Result<(), Error> {
     // Check for duplicate chain configuration and invalid trust thresholds
     let mut unique_chain_ids = BTreeSet::new();
     for c in config.chains.iter() {
-        if !unique_chain_ids.insert(c.id.clone()) {
-            return Err(Error::duplicate_chains(c.id.clone()));
+        if !unique_chain_ids.insert(c.id().clone()) {
+            return Err(Error::duplicate_chains(c.id().clone()));
         }
-
-        validate_trust_threshold(&c.id, c.trust_threshold)?;
+        //config-specific validation
+        match c {
+            ChainConfig::Tendermint(confi) => {
+                validate_trust_threshold(&confi.id, confi.trust_threshold)?;
+            },
+            ChainConfig::Celo(_) => {},
+        };
     }
 
     Ok(())

@@ -75,7 +75,8 @@ impl Override<Config> for TxIcs20MsgTransferCmd {
         })?;
 
         if let Some(ref key_name) = self.key {
-            src_chain_config.key_name = key_name.to_string();
+            panic!("not allowed")
+            //src_chain_config.key_name = key_name.to_string();
         }
 
         Ok(config)

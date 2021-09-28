@@ -30,7 +30,7 @@ use ibc::{
 };
 use tracing::trace;
 
-use crate::{chain::CosmosSdkChain, config::ChainConfig, error::Error};
+use crate::{chain::CosmosSdkChain, config::TMChainConfig, error::Error};
 
 use super::Verified;
 
@@ -164,7 +164,7 @@ impl super::LightClient<CosmosSdkChain> for LightClient {
 }
 
 impl LightClient {
-    pub fn from_config(config: &ChainConfig, peer_id: PeerId) -> Result<Self, Error> {
+    pub fn from_config(config: &TMChainConfig, peer_id: PeerId) -> Result<Self, Error> {
         let rpc_client = rpc::HttpClient::new(config.rpc_addr.clone())
             .map_err(|e| Error::rpc(config.rpc_addr.clone(), e))?;
 

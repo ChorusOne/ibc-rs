@@ -1,27 +1,25 @@
 #![allow(unused)]
 
-use super::ChainEndpoint;
-use crate::config::ChainConfig;
+use super::{ChainEndpoint, MinimalChainEndpoint};
+use crate::chain::{HealthCheck, TxResponse};
+use crate::config::CeloChainConfig;
 use crate::error::Error;
-use crate::chain::{TxResponse, HealthCheck};
 use crate::event::monitor::{
-    EventBatch, EventReceiver, EventSender, MonitorCmd, Result as EventResult, TxMonitorCmd,
+    Error as EventError, EventBatch, EventReceiver, EventSender, MonitorCmd, Result as EventResult,
+    TxMonitorCmd,
 };
 use crate::keyring::{KeyEntry, KeyRing, Store};
 use crate::light_client::celo_ibft::LightClient as CeloLightClient;
-use crate::light_client::LightClient;
-use crate::light_client::Verified;
-use celo_light_client::ToRlp;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use crate::light_client::{LightClient, Verified};
 use crossbeam_channel::{Receiver, Sender};
+use futures::TryStreamExt;
 use ibc::events::IbcEvent;
 use ibc::ics02_client::client_consensus::{
     AnyConsensusState, AnyConsensusStateWithHeight, ConsensusState,
 };
 use ibc::ics02_client::client_state::{AnyClientState, ClientState, IdentifiedAnyClientState};
 use ibc::ics02_client::client_type::ClientType;
-use ibc::ics02_client::events::Attributes;
-use ibc::ics02_client::events::{CreateClient, UpdateClient};
+use ibc::ics02_client::events::{Attributes, CreateClient, NewBlock, UpdateClient};
 use ibc::ics02_client::header::Header;
 use ibc::ics02_client::height::Height;
 use ibc::ics03_connection::connection::{
@@ -33,7 +31,7 @@ use ibc::ics04_channel::packet::{PacketMsgType, Sequence};
 use ibc::ics23_commitment::commitment::{CommitmentPrefix, CommitmentRoot};
 use ibc::ics24_host::identifier::{ChainId, ChannelId, ClientId, ConnectionId, PortId};
 use ibc::ics28_wasm::client_state::ClientState as WasmClientState;
-use ibc::ics28_wasm::consensus_state::ConsensusState as WasmConsensuState;
+use ibc::ics28_wasm::consensus_state::ConsensusState as WasmConsensusState;
 use ibc::ics28_wasm::header::Header as WasmHeader;
 use ibc::query::QueryTxRequest;
 use ibc::signer::Signer;
@@ -58,85 +56,290 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::runtime::Runtime as TokioRuntime;
 
-pub mod compatibility;
+pub(crate) mod compatibility;
+mod contracts;
 use compatibility::*;
 
 pub struct CeloChain {
-    config: ChainConfig,
+    config: CeloChainConfig,
     rt: Arc<TokioRuntime>,
     keybase: KeyRing,
-    shutdown: (TxMonitorCmd, Receiver<MonitorCmd>),
-    starter: (Sender<bool>, Receiver<bool>),
-    blocks: Vec<SimulationBlock>,
-    latest_height: Arc<AtomicU64>,
-    tm_client: compatibility::tm::DummyTendermint,
+    celo: Web3Client,
+    client_contract: EthContract,
+    host_contract: EthContract,
+    handler_contract: EthContract,
+    monitor_handle: std::cell::RefCell<Option<tokio::task::JoinHandle<()>>>,
+}
+impl CeloChain {
+    fn options_for_query(&self) -> web3::contract::Options {
+        web3::contract::Options {
+            gas: self.config.max_gas.map(web3::types::U256::from),
+            gas_price: Some(web3::types::U256::from(self.config.gas_price)),
+            ..Default::default()
+        }
+    }
+    fn sender(&self) -> Result<web3::types::Address, Error> {
+        let key_entry = self
+            .keybase
+            .get_key(&self.config.key_name)
+            .map_err(Error::key_base)?;
+        let addr = web3::types::Address::from_slice(&key_entry.address);
+        Ok(addr)
+    }
+    fn query_state<State, Params>(
+        &self,
+        method: &str,
+        height: ICSHeight,
+        p: Params,
+    ) -> Result<State, Error>
+    where
+        State: Message + std::any::Any + Default,
+        Params: web3::contract::tokens::Tokenize + core::fmt::Debug,
+    {
+        if height.revision_number != self.config.id.version() {
+            return Err(Error::celo_custom(String::from(
+                "can't deal with different revision numbers",
+            )));
+        }
+        let full_call = format!("IBCHost::{}({:?})", method, p);
+        let block = web3::types::BlockId::Number(web3::types::BlockNumber::Number(
+            web3::types::U64::from(height.revision_height),
+        ));
+        let (state_bytes, present): (Vec<u8>, bool) = self
+            .rt
+            .block_on(self.host_contract.query(
+                method,
+                p,
+                self.sender()?,
+                self.options_for_query(),
+                Some(block),
+            ))
+            .map_err(|e| Error::web3_contract(full_call.clone(), e))?;
+        if !present {
+            return Err(Error::celo_custom(
+                format!("{}:state not found", full_call,),
+            ));
+        }
+        let state = State::decode(bytes::Bytes::from(state_bytes))
+            .map_err(|e| Error::protobuf_decode(std::any::type_name::<State>().to_string(), e))?;
+        Ok(state)
+    }
 }
 
-impl CeloChain {
-    fn inner_build_client_state(&self, idx: usize) -> WasmClientState {
-        let block = self.blocks.get(idx).unwrap();
-        let h = Height {
-            revision_number: 0,
-            revision_height: block.header.number.clone().try_into().unwrap(),
-        };
-        let cl = WasmClientState {
-            chain_id: self.config.id.clone(),
-            code_id: hex::decode(&self.config.code_id).unwrap(),
-            data: block.initial_client_state.to_rlp(),
-            is_frozen: false,
-            latest_height: h,
-        };
-        cl
+impl MinimalChainEndpoint for CeloChain {
+    fn id(&self) -> &ChainId {
+        println!("giulio - CeloChain::id");
+        &self.config.id
     }
-    fn inner_build_consensus_state(&self, idx: usize) -> WasmConsensuState {
-        let block = self.blocks.get(idx).unwrap();
-        let s = WasmConsensuState {
-            data: block.initial_consensus_state.to_rlp(),
-            code_id: hex::decode(&self.config.code_id).unwrap(),
-            root: CommitmentRoot::from_bytes(block.header.root.as_ref()),
-            timestamp: DateTime::<Utc>::from_utc(
-                NaiveDateTime::from_timestamp(block.initial_consensus_state.timestamp as i64, 0),
-                Utc,
-            ),
+
+    fn health_check(&self) -> Result<HealthCheck, Error> {
+        self.rt
+            .block_on(self.celo.web3().client_version())
+            .map_err(|e| Error::web3(self.config.rpc_addr.to_string(), e))?;
+        //TODO! check version compatibility
+        //TODO! call to https://docs.rs/web3/0.17.0/web3/api/struct.Eth.html#method.syncing
+        Ok(HealthCheck::Healthy)
+    }
+
+    fn keybase(&self) -> &KeyRing {
+        println!("giulio - CeloChain::keybase");
+        &self.keybase
+    }
+
+    fn keybase_mut(&mut self) -> &mut KeyRing {
+        println!("giulio - CeloChain::keybase_mut");
+        &mut self.keybase
+    }
+
+    fn get_signer(&mut self) -> Result<Signer, Error> {
+        println!("giulio - CeloChain::get_signer");
+        let s = Signer::from(String::from("this is a celo Signer"));
+        Ok(s)
+    }
+
+    fn get_key(&mut self) -> Result<KeyEntry, Error> {
+        self.keybase
+            .get_key(&self.config.key_name)
+            .map_err(Error::key_base)
+    }
+
+    fn send_messages_and_wait_commit(
+        &mut self,
+        proto_msgs: Vec<Any>,
+    ) -> Result<Vec<IbcEvent>, Error> {
+        let types: Vec<String> = proto_msgs.into_iter().map(|proto| proto.type_url).collect();
+        todo!("giulio - CeloChain::send_messages_and_wait_commit - {:?}", types);
+    }
+
+    /// Queries
+    fn query_latest_height(&self) -> Result<ICSHeight, Error> {
+        let height = self
+            .rt
+            .block_on(self.celo.eth().block_number())
+            .map_err(|e| Error::web3(self.config.rpc_addr.clone().into(), e))?;
+        let h = ICSHeight {
+            revision_number: self.config.id.version(),
+            revision_height: height.as_u64(),
         };
-        s
+        Ok(h)
+    }
+
+    fn query_client_state(
+        &self,
+        client_id: &ClientId,
+        height: ICSHeight,
+    ) -> Result<AnyClientState, Error> {
+        let params = (client_id.to_string(),);
+        let raw_tm_cl_state: ibc_proto::ibc::lightclients::tendermint::v1::ClientState =
+            self.query_state("getClientState", height, params)?;
+        let tm_state = ibc::ics07_tendermint::client_state::ClientState::try_from(raw_tm_cl_state)
+            .map_err(Error::ics07)?;
+        Ok(tm_state.wrap_any())
+    }
+
+    fn query_txs(&self, request: QueryTxRequest) -> Result<Vec<IbcEvent>, Error> {
+        todo!()
+    }
+
+    fn query_connections(
+        &self,
+        request: QueryConnectionsRequest,
+    ) -> Result<Vec<IdentifiedConnectionEnd>, Error> {
+        todo!()
+    }
+
+    fn query_client_connections(
+        &self,
+        request: QueryClientConnectionsRequest,
+    ) -> Result<Vec<ConnectionId>, Error> {
+        todo!(
+            "giulio - CeloChain::query_client_connections - {:?}",
+            request
+        );
+    }
+
+    fn query_connection(
+        &self,
+        connection_id: &ConnectionId,
+        height: ICSHeight,
+    ) -> Result<ConnectionEnd, Error> {
+        let params = (connection_id.to_string(),);
+        let raw_state: ibc_proto::ibc::core::connection::v1::ConnectionEnd =
+            self.query_state("getConnection", height, params)?;
+        //let tm_state = ibc::ics07_tendermint::client_state::ClientState::try_from(raw_state)
+        //.map_err(Error::ics07)?;
+
+        todo!(
+            "giulio - CeloChain::query_connection - {:?} - {:?}",
+            connection_id,
+            height
+        );
+    }
+
+    fn query_connection_channels(
+        &self,
+        request: QueryConnectionChannelsRequest,
+    ) -> Result<Vec<IdentifiedChannelEnd>, Error> {
+        todo!()
+    }
+
+    fn query_clients(
+        &self,
+        request: QueryClientStatesRequest,
+    ) -> Result<Vec<IdentifiedAnyClientState>, Error> {
+        todo!("giulio - CeloChain::query_clients {:?}", request);
+    }
+
+    fn query_consensus_states(
+        &self,
+        request: QueryConsensusStatesRequest,
+    ) -> Result<Vec<AnyConsensusStateWithHeight>, Error> {
+        todo!("giulio - CeloChain::query_consensus_states {:?}", request);
+    }
+
+    fn query_consensus_state(
+        &self,
+        client_id: ClientId,
+        consensus_height: ICSHeight,
+        query_height: ICSHeight,
+    ) -> Result<AnyConsensusState, Error> {
+        if consensus_height.revision_number != query_height.revision_number {
+            return Err(Error::celo_custom(String::from(
+                "can't deal with different revision numbers",
+            )));
+        }
+        let params = (
+            client_id.to_string(),
+            web3::types::U256::from(query_height.revision_height),
+        );
+        let raw_state: ibc_proto::ibc::lightclients::tendermint::v1::ConsensusState =
+            self.query_state("getConsensusState", query_height, params)?;
+        let tm_state = ibc::ics07_tendermint::consensus_state::ConsensusState::try_from(raw_state)
+            .map_err(Error::ics07)?;
+        Ok(tm_state.wrap_any())
+    }
+
+    fn query_channel(
+        &self,
+        port_id: &PortId,
+        channel_id: &ChannelId,
+        height: ICSHeight,
+    ) -> Result<ChannelEnd, Error> {
+        todo!()
     }
 }
 
 impl ChainEndpoint for CeloChain {
-    type LightBlock = SimulationBlock;
+    type ChainConfig = CeloChainConfig;
+    type LightBlock = CeloBlock;
     type Header = WasmHeader;
-    type ConsensusState = WasmConsensuState;
+    type ConsensusState = WasmConsensusState;
     type ClientState = WasmClientState;
     type LightClient = CeloLightClient;
 
-    fn bootstrap(config: ChainConfig, rt: Arc<TokioRuntime>) -> Result<Self, Error> {
+    fn bootstrap(config: CeloChainConfig, rt: Arc<TokioRuntime>) -> Result<Self, Error> {
         println!("giulio - CeloChain::bootstrap");
-        let shutdown = crossbeam_channel::unbounded::<MonitorCmd>();
-        let starter = crossbeam_channel::unbounded::<bool>();
+        //TODO! (check chainId from config and from rpc node match)
         let keybase = KeyRing::new(Store::Test, &config.account_prefix, &config.id)
             .map_err(Error::key_base)?;
-        let sim_data =
-            std::fs::read_to_string(std::path::Path::new(&config.simul_file)).map_err(Error::io)?;
-        let mut blocks: Vec<SimulationBlock> = sim_data
-            .split("\n\n")
-            .map(|s| serde_json::from_str(s).unwrap())
-            .collect();
+        let celo_node_address = config.websocket_addr.to_string();
+        let transport = rt
+            .block_on(web3::transports::WebSocket::new(&celo_node_address))
+            .map_err(|e| Error::web3(celo_node_address.clone(), e))?;
+        let celo = web3::Web3::new(transport);
+        let client_contract = build_contract(
+            celo.eth(),
+            &config.client_contract_abi_json,
+            config.client_contract_address,
+        )?;
+        let host_contract = build_contract(
+            celo.eth(),
+            &config.host_contract_abi_json,
+            config.host_contract_address,
+        )?;
+        let handler_contract = build_contract(
+            celo.eth(),
+            &config.handler_contract_abi_json,
+            config.handler_contract_address,
+        )?;
         let s = Self {
             config,
             rt,
             keybase,
-            shutdown,
-            starter,
-            blocks,
-            latest_height: Arc::new(AtomicU64::new(0)),
-            tm_client: compatibility::tm::DummyTendermint::default(),
+            celo,
+            client_contract,
+            host_contract,
+            handler_contract,
+            monitor_handle: std::cell::RefCell::new(None),
         };
         Ok(s)
     }
-    fn init_light_client(&self) -> Result<Self::LightClient, Error> {
+    fn init_light_client(&self) -> Result<CeloLightClient, Error> {
         let lt = CeloLightClient {
-            blocks: self.blocks.clone(),
+            client: self.celo.clone(),
+            rpc_addr: self.config.rpc_addr.clone(),
+            chain_revision: self.config.id.version(),
+            rt: self.rt.clone(),
         };
         Ok(lt)
     }
@@ -145,248 +348,65 @@ impl ChainEndpoint for CeloChain {
         rt: Arc<TokioRuntime>,
     ) -> Result<(EventReceiver, TxMonitorCmd), Error> {
         println!("giulio - CeloChain::init_event_monitor");
-        let events = crossbeam_channel::unbounded::<EventResult<EventBatch>>();
-        let ch_id = self.config.id.clone();
-        let starter = self.starter.1.clone();
-        let tx_receiver = self.shutdown.1.clone();
-        let sender = events.0;
-        let blocks = self.blocks.clone();
-        let counter = Arc::clone(&self.latest_height);
-        rt.spawn(async move {
-            match starter.recv_timeout(std::time::Duration::from_secs(20)) {
-                Ok(true) => {
-                    println!("giulio CeloChain::init_event_monitor - start sending ");
+        let (sender, receiver) = crossbeam_channel::unbounded::<EventResult<EventBatch>>();
+        let (tx_sender, tx_receiver) = crossbeam_channel::unbounded::<MonitorCmd>();
+        let mut subscription = rt
+            .block_on(self.celo.eth_subscribe().subscribe_new_heads())
+            .map_err(|e| Error::web3(self.config.websocket_addr.to_string(), e))?;
+        let chain_id = self.config.id.clone();
+        let revision_number = self.config.id.version();
+        let f = async move {
+            loop {
+                match tx_receiver.try_recv() {
+                    Ok(command) => match command {
+                        MonitorCmd::Shutdown => return,
+                    },
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => return,
+                    Err(crossbeam_channel::TryRecvError::Empty) => {}
                 }
-                Ok(false) => {
-                    println!("giulio CeloChain::init_event_monitor - starter false ");
-                    return;
-                }
-                Err(_) => {
-                    println!("giulio CeloChain::init_event_monitor - start ch is closed ");
-                    return;
-                }
-            };
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            for (idx, block) in blocks.iter().enumerate() {
-                counter.store(idx as u64, Ordering::Relaxed);
-                if !tx_receiver.is_empty() {
-                    break;
-                }
-                let h = Height {
-                    revision_number: 0,
-                    revision_height: block.header.number.clone().try_into().unwrap(),
+                let event = match subscription.try_next().await {
+                    Ok(Some(header)) => {
+                        let height = Height {
+                            revision_number,
+                            revision_height: header
+                                .number
+                                .expect("blockheader with no number")
+                                .as_u64(),
+                        };
+                        let ev = EventBatch {
+                            chain_id: chain_id.clone(),
+                            height,
+                            events: vec![IbcEvent::NewBlock(NewBlock { height })],
+                        };
+                        Ok(ev)
+                    }
+                    Ok(None) => Err(EventError::collect_events_failed(String::from(
+                        "header_subscription: empty event",
+                    ))),
+                    Err(err) => Err(EventError::web3_rpc(err)),
                 };
-                let wasm_h = WasmHeader {
-                    height: h,
-                    data: block.header.to_rlp(),
-                };
-                let h = wasm_h.height();
-                let attr = Attributes {
-                    client_id: ClientId::new(ClientType::Wasm, 0).unwrap(),
-                    client_type: ClientType::Wasm,
-                    consensus_height: h,
-                    height: h,
-                };
-                let u_c = UpdateClient {
-                    common: attr,
-                    header: Some(wasm_h.wrap_any()),
-                };
-                let ev = EventBatch {
-                    chain_id: ch_id.clone(),
-                    height: h,
-                    events: vec![IbcEvent::UpdateClient(u_c)],
-                };
-                println!("giulio - event_monitor - sending {}", idx);
-                sender.send(Ok(ev)).unwrap();
-                std::thread::sleep(std::time::Duration::from_secs(5));
+                sender.send(event);
             }
-        });
-        Ok((events.1, self.shutdown.0.clone()))
+        };
+        self.monitor_handle.replace(Some(self.rt.spawn(f)));
+        Ok((receiver, tx_sender))
     }
+
     fn shutdown(self) -> Result<(), Error> {
-        println!("giulio - CeloChain::shutdown");
-        self.starter.0.send(false);
-        self.shutdown
-            .0
-            .send(MonitorCmd::Shutdown)
-            .map_err(Error::send)
+        if let Some(handle) = self.monitor_handle.take() {
+            handle.abort();
+        }
+        Ok(())
     }
-    fn id(&self) -> &ChainId {
-        println!("giulio - CeloChain::id");
-        &self.config.id
-    }
-    fn keybase(&self) -> &KeyRing {
-        println!("giulio - CeloChain::keybase");
-        &self.keybase
-    }
-    fn keybase_mut(&mut self) -> &mut KeyRing {
-        println!("giulio - CeloChain::keybase_mut");
-        &mut self.keybase
-    }
+
     fn send_messages_and_wait_check_tx(
         &mut self,
         proto_msgs: Vec<Any>,
     ) -> Result<Vec<TxResponse>, Error> {
         todo!("send_messages_and_wait_check_tx")
     }
-    fn health_check(&self) -> Result<HealthCheck, Error> {
-        Ok(HealthCheck::Healthy)
-    }
-    fn send_messages_and_wait_commit(
-        &mut self,
-        proto_msgs: Vec<Any>,
-    ) -> Result<Vec<IbcEvent>, Error> {
-        println!("giulio - CeloChain::send_msgs - {:?}", proto_msgs.len());
-        let mut resps = Vec::with_capacity(proto_msgs.len());
-        for msg in proto_msgs {
-            match msg.type_url.as_str() {
-                "/ibc.core.client.v1.MsgCreateClient" => {
-                    let res = ibc_proto::ibc::core::client::v1::MsgCreateClient::decode(
-                        msg.value.as_slice(),
-                    )
-                    .unwrap();
-                    let tm_client = compatibility::tm::DummyTendermint::from_create_client_msg(res);
-                    self.tm_client = tm_client;
-                    let event = CreateClient(Attributes {
-                        client_id: self.tm_client.client_id(),
-                        client_type: ClientType::Tendermint,
-                        height: self.query_latest_height().unwrap(),
-                        consensus_height: self.tm_client.height(),
-                    });
-                    resps.push(IbcEvent::CreateClient(event));
-                }
-                "/ibc.core.client.v1.MsgUpdateClient" => {
-                    let res = ibc_proto::ibc::core::client::v1::MsgUpdateClient::decode(
-                        msg.value.as_slice(),
-                    )
-                    .unwrap();
-                    self.tm_client.update(res);
-                    let event = UpdateClient {
-                        common: Attributes {
-                            height: self.query_latest_height().unwrap(),
-                            consensus_height: self
-                                .tm_client
-                                .cls
-                                .last()
-                                .unwrap()
-                                .latest_height
-                                .clone(),
-                            client_type: ClientType::Tendermint,
-                            client_id: self.tm_client.client_id(),
-                        },
-                        header: None,
-                    };
-                    resps.push(IbcEvent::UpdateClient(event));
-                }
-                "/ibc.core.connection.v1.MsgConnectionOpenTry" => {
-                    let conn_try =
-                        ibc_proto::ibc::core::connection::v1::MsgConnectionOpenTry::decode(
-                            msg.value.as_slice(),
-                        )
-                        .unwrap();
-                    let (id, cend) = self.tm_client.conn_try_open(conn_try.clone());
-                    let resp = OpenTry::from(ConnAttributes {
-                        height: self.query_latest_height().unwrap(),
-                        client_id: cend.client_id().clone(),
-                        connection_id: Some(id),
-                        counterparty_connection_id: None,
-                        counterparty_client_id: cend.counterparty().client_id().clone(),
-                    });
-                    resps.push(IbcEvent::OpenTryConnection(resp))
-                }
-                _ => panic!("typeUrl Unknown {}", msg.type_url),
-            }
-        }
-        self.starter.0.send(true);
-        Ok(resps)
-    }
-    fn get_signer(&mut self) -> Result<Signer, Error> {
-        println!("giulio - CeloChain::get_signer");
-        let s = Signer::from(String::from("this is a celo Signer"));
-        Ok(s)
-    }
-    fn get_key(&mut self) -> Result<KeyEntry, Error> {
-        println!("giulio - CeloChain::get_key");
-        let key = self
-            .keybase()
-            .get_key(&self.config.key_name)
-            .map_err(Error::key_base)?;
-
-        Ok(key)
-    }
     fn query_commitment_prefix(&self) -> Result<CommitmentPrefix, Error> {
-        println!("giulio - CeloChain::query_commitment_prefix");
-        Ok(CommitmentPrefix::from(
-            self.config.store_prefix.as_bytes().to_vec(),
-        ))
-    }
-    fn query_latest_height(&self) -> Result<ICSHeight, Error> {
-        let idx: u64 = self.latest_height.fetch_add(1, Ordering::Relaxed);
-        let block = self.blocks.get((idx + 1) as usize).unwrap();
-        //let block = self.blocks.get(idx as usize).unwrap();
-        let r = ICSHeight {
-            revision_number: 0,
-            revision_height: block.header.number.clone().try_into().unwrap(),
-        };
-        println!("giulio CeloChain::query_latest_height - {} - {:?}", idx, r);
-        Ok(r)
-    }
-    fn query_clients(
-        &self,
-        request: QueryClientStatesRequest,
-    ) -> Result<Vec<IdentifiedAnyClientState>, Error> {
-        println!("giulio - CeloChain::query_clients {:?}", request);
-        let idx = self.latest_height.fetch_add(1, Ordering::Relaxed);
-        let cs = self.inner_build_client_state(idx as usize);
-
-        let state = IdentifiedAnyClientState {
-            client_id: ClientId::new(ClientType::Wasm, 0).unwrap(),
-            client_state: cs.wrap_any(),
-        };
-        let states: Vec<IdentifiedAnyClientState> = vec![state];
-        Ok(states)
-    }
-    fn query_client_state(
-        &self,
-        client_id: &ClientId,
-        height: ICSHeight,
-    ) -> Result<AnyClientState, Error> {
-        println!(
-            "giulio - CeloChain::query_client_state {:?} - {:?}",
-            client_id, height
-        );
-        if *client_id == self.tm_client.client_id() {
-            let cl = self.tm_client.cls.last().unwrap().clone().wrap_any();
-            return Ok(cl);
-        }
-        let idx = self.latest_height.fetch_add(1, Ordering::Relaxed);
-        let cs = self.inner_build_client_state(idx as usize);
-        Ok(cs.wrap_any())
-    }
-    fn query_consensus_states(
-        &self,
-        request: QueryConsensusStatesRequest,
-    ) -> Result<Vec<AnyConsensusStateWithHeight>, Error> {
-        println!("giulio - CeloChain::query_consensus_states {:?}", request);
-
-        let states = self.tm_client.consensus_states_with_height();
-        Ok(states)
-    }
-    fn query_consensus_state(
-        &self,
-        client_id: ClientId,
-        consensus_height: ICSHeight,
-        query_height: ICSHeight,
-    ) -> Result<AnyConsensusState, Error> {
-        println!(
-            "giulio - CeloChain;:query_consensus_state - {} {} {}",
-            client_id, consensus_height, query_height
-        );
-        if client_id == self.tm_client.client_id() {
-            let cs = self.tm_client.css.last().unwrap().clone().wrap_any();
-            return Ok(cs);
-        }
-        panic!("what --- {:?}", client_id)
+        todo!("giulio - CeloChain::query_commitment_prefix");
     }
     fn query_upgraded_client_state(
         &self,
@@ -400,61 +420,14 @@ impl ChainEndpoint for CeloChain {
     ) -> Result<(Self::ConsensusState, MerkleProof), Error> {
         todo!()
     }
-    fn query_connections(
-        &self,
-        request: QueryConnectionsRequest,
-    ) -> Result<Vec<IdentifiedConnectionEnd>, Error> {
-        todo!()
-    }
-    fn query_client_connections(
-        &self,
-        request: QueryClientConnectionsRequest,
-    ) -> Result<Vec<ConnectionId>, Error> {
-        println!(
-            "giulio - CeloChain::query_client_connections - {:?}",
-            request
-        );
-        let ids = self
-            .tm_client
-            .conns
-            .iter()
-            .enumerate()
-            .map(|(idx, _)| ConnectionId::new(idx as u64))
-            .collect();
-        Ok(ids)
-    }
-    fn query_connection(
-        &self,
-        connection_id: &ConnectionId,
-        height: ICSHeight,
-    ) -> Result<ConnectionEnd, Error> {
-        println!(
-            "giulio - CeloChain::query_connection - {:?} - {:?}",
-            connection_id, height
-        );
-        let cend = self.tm_client.conn_end(connection_id).unwrap_or_default();
-        Ok(cend)
-    }
-    fn query_connection_channels(
-        &self,
-        request: QueryConnectionChannelsRequest,
-    ) -> Result<Vec<IdentifiedChannelEnd>, Error> {
-        todo!()
-    }
+
     fn query_channels(
         &self,
         request: QueryChannelsRequest,
     ) -> Result<Vec<IdentifiedChannelEnd>, Error> {
         todo!()
     }
-    fn query_channel(
-        &self,
-        port_id: &PortId,
-        channel_id: &ChannelId,
-        height: ICSHeight,
-    ) -> Result<ChannelEnd, Error> {
-        todo!()
-    }
+
     fn query_channel_client_state(
         &self,
         request: QueryChannelClientStateRequest,
@@ -489,9 +462,6 @@ impl ChainEndpoint for CeloChain {
         &self,
         request: QueryNextSequenceReceiveRequest,
     ) -> Result<Sequence, Error> {
-        todo!()
-    }
-    fn query_txs(&self, request: QueryTxRequest) -> Result<Vec<IbcEvent>, Error> {
         todo!()
     }
     fn proven_client_state(
@@ -544,44 +514,83 @@ impl ChainEndpoint for CeloChain {
     }
 
     fn build_client_state(&self, height: ICSHeight) -> Result<Self::ClientState, Error> {
-        println!("giulio - CeloChain::build_client_state");
-        let first_block = self.blocks.first().unwrap();
+        todo!("giulio - CeloChain::build_client_state");
+        // TODO: these config params should all be loaded from the config
+        let celo_cl = celo_types::client::LightClientState {
+            epoch_size: self.config.epoch_size,
+            allowed_clock_skew: self.config.allowed_clock_skew,
+            trusting_period: self.config.trusting_period,
+            upgrade_path: self.config.upgrade_path,
+            verify_epoch_headers: self.config.verify_epoch_headers,
+            verify_non_epoch_headers: self.config.verify_non_epoch_headers,
+            verify_header_timestamp: self.config.verify_header_timestamp,
+            allow_update_after_expiry: self.config.allow_update_after_expiry,
+            allow_update_after_misbehavior: self.config.allow_update_after_misbehavior,
+        };
+
         let cl = WasmClientState {
             chain_id: self.config.id.clone(),
-            code_id: hex::decode(&self.config.code_id).unwrap(),
-            data: first_block.initial_client_state.to_rlp(),
+            code_id: hex::decode(&self.config.code_id).map_err(Error::hex_decode)?,
+            data: rlp::encode(&celo_cl).to_vec(),
             is_frozen: false,
             latest_height: height,
         };
         Ok(cl)
     }
+
     fn build_consensus_state(
         &self,
         block: Self::LightBlock,
     ) -> Result<Self::ConsensusState, Error> {
-        println!("giulio CeloChain::build_consensus_state");
-        let s = WasmConsensuState {
-            data: block.initial_consensus_state.to_rlp(),
-            code_id: hex::decode(&self.config.code_id).unwrap(),
-            root: CommitmentRoot::from_bytes(block.header.root.as_ref()),
-            timestamp: DateTime::<Utc>::from_utc(
-                NaiveDateTime::from_timestamp(block.initial_consensus_state.timestamp as i64, 0),
-                Utc,
-            ),
-        };
-        Ok(s)
+        build_wasm_consensus_state(block, &self.config.code_id)
     }
+
     fn build_header(
         &self,
-        trusted_height: ICSHeight,
-        target_height: ICSHeight,
+        trusted: ICSHeight,
+        target: ICSHeight,
         client_state: &AnyClientState,
         light_client: &mut Self::LightClient,
     ) -> Result<(Self::Header, Vec<Self::Header>), Error> {
-        println!("giulio CeloChain::build_header");
-        let Verified { target, supporting } =
-            light_client.header_and_minimal_set(trusted_height, target_height, client_state)?;
-
-        Ok((target, supporting))
+        if trusted.revision_number != target.revision_number
+            || trusted.revision_number != self.config.id.version()
+        {
+            return Err(Error::celo_custom(String::from(
+                "can't deal with different revision numbers",
+            )));
+        }
+        let supporting_heights: Vec<u64> =
+            (trusted.revision_height + 1..target.revision_height).collect();
+        let res = self
+            .rt
+            .block_on(light_client.get_headers(&supporting_heights, target.revision_height))?;
+        let supportings = res
+            .supporting
+            .into_iter()
+            .map(|h| build_wasm_header(h, trusted.revision_number))
+            .collect();
+        let target = build_wasm_header(res.target, trusted.revision_number);
+        Ok((target, supportings))
     }
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
+pub struct TruffleAbi {
+    abi: Vec<serde_json::Value>,
+}
+
+fn build_contract(
+    eth: EthAPI,
+    abi_fname: &std::path::Path,
+    address: web3::types::Address,
+) -> Result<EthContract, Error> {
+    println!("giulio - build_contract {:?}", abi_fname);
+    let abi_file = std::fs::File::open(abi_fname).map_err(Error::io)?;
+    let reader = std::io::BufReader::new(abi_file);
+    let abi: TruffleAbi = serde_json::from_reader(reader).map_err(Error::serde_json)?;
+    let serialized_abi: Vec<u8> = serde_json::to_vec(&abi.abi).map_err(Error::serde_json)?;
+
+    let contract = web3::contract::Contract::from_json(eth, address, &serialized_abi)
+        .map_err(Error::eth_abi)?;
+    Ok(contract)
 }
