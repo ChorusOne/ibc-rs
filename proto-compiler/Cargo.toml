@@ -6,7 +6,7 @@ edition = "2018"
 publish = false
 
 [dependencies]
-git2 = "0.13"
+git2 = "0.14"
 prost-build = "0.7"
 tempdir = "0.3.7"
 walkdir = "2.3"
